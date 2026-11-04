@@ -1,5 +1,19 @@
 # fleeting-plugin-fleetingd - Ephemeral VMs for GitLab CI
 
+> This is a fork of [helmholtzcloud/fleeting-plugin-fleetingd](https://github.com/helmholtzcloud/fleeting-plugin-fleetingd)
+> by the Helmholtz Cloud team, used by [fleetci](https://github.com/nesty92/fleetci).
+> The `fleetci` branch adds:
+>
+> - `name`, a free `vm_subnet` and a lock on `vm_disk_directory`, so several
+>   groups (VM sizes) can share one host;
+> - a qcow2 overlay per VM instead of a full copy of the image
+>   (`vm_full_disk_copy = true` restores the copy);
+> - `vm_package_upgrade = false` to skip apt update and upgrade on every boot;
+> - a fix for a failed VM start, which kept the inventory lock and the
+>   address slot.
+>
+> The rest of this README is upstream's.
+
 This is a [fleeting plugin](https://docs.gitlab.com/runner/fleet_scaling/fleeting/) for running a pool of customizable disposable VMs for executing GitLab CI tasks. Whereas other plugins maintain a pool on a cloud provider's platform you can bring your own (rental) bare-metal hardware here.
 The original motivation was to provide users with a simple way to build container images, but it can be used to run anything else you would run in VMs or where VM-level isolation is desired for GitLab builds. Users receive a new Ubuntu machine with passwordless sudo for each build and a selection of software of your choice preinstalled (e.g. Podman). Altenatively, you can switch it to `docker-autoscaler` and execute builds and services running in containers in the VMs.
 
@@ -194,4 +208,15 @@ You can run `fleeting-plugin-fleetingd licenses` to view the software's and depe
 
       # You can enable the virtio console file in the .instance_data subdirectory of vm_disk_directory
       vm_enable_virtio_console = false
+
+      # fork: tells groups on one host apart (ID, VM, tap and nftables names);
+      # each group also needs its own vm_subnet and vm_disk_directory
+      name = "fleetingd"
+
+      # fork: copy the whole image per VM instead of a qcow2 overlay
+      # (only for cloud-hypervisor without backing_files support)
+      vm_full_disk_copy = false
+
+      # fork: apt update and upgrade in every VM on boot (the prebuild does both)
+      vm_package_upgrade = true
 ```
