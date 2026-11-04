@@ -204,12 +204,23 @@ func (i *InstanceGroup) copyImage(instanceName string) (string, error) {
 
 	copyPath := filepath.Join(i.VMDiskDir, vmWorkdir, instanceName+".img")
 
-	imageCopyCommand := exec.Command("cp", "-f", decompressedPath, copyPath)
-	err = imageCopyCommand.Run()
-	if err != nil {
-		return "", err
+	if i.VMFullDiskCopy {
+		imageCopyCommand := exec.Command("cp", "-f", decompressedPath, copyPath)
+		if out, err := imageCopyCommand.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("copying disk image: %w: %s", err, out)
+		}
+		return copyPath, nil
 	}
 
+	// A qcow2 overlay on the prebuilt image: created in milliseconds, holds
+	// only what this VM writes. The prebuilt image is not touched again
+	// until the next prebuild, which happens with no VMs running.
+	_ = os.Remove(copyPath)
+	overlayCommand := exec.Command("qemu-img", "create", "-q", "-f", "qcow2",
+		"-b", decompressedPath, "-F", "qcow2", copyPath)
+	if out, err := overlayCommand.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("creating disk overlay: %w: %s", err, out)
+	}
 	return copyPath, nil
 }
 
@@ -511,4 +522,13 @@ func addSuffixToFilepath(filePath string, suffix string) string {
 	fileExtension := filepath.Ext(filePath)
 
 	return strings.TrimSuffix(filePath, fileExtension) + suffix + fileExtension
+}
+
+// diskArg is cloud-hypervisor's --disk for a VM's own image. An overlay
+// needs backing_files=on, or cloud-hypervisor refuses to open its base.
+func (i *InstanceGroup) diskArg(path string) string {
+	if i.VMFullDiskCopy {
+		return fmt.Sprintf("path=%s,image_type=qcow2", path)
+	}
+	return fmt.Sprintf("path=%s,image_type=qcow2,backing_files=on", path)
 }

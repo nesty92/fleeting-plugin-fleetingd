@@ -201,7 +201,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 		"--kernel",
 		kernelFilePath,
 		"--disk",
-		fmt.Sprintf("path=%s,image_type=qcow2", overlayPath),
+		instanceGroup.diskArg(overlayPath),
 		fmt.Sprintf("path=%s,readonly=on,image_type=raw", userdataPath),
 		"--cpus",
 		fmt.Sprintf("boot=%d", instanceGroup.VMNumCPUCores),

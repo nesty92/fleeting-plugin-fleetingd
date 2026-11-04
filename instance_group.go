@@ -26,6 +26,10 @@ type InstanceGroup struct {
 	VMDiskSizeGB                 uint64   `json:"vm_disk_size_gb"`
 	VMPrebuildCloudinitExtraCmds []string `json:"vm_prebuild_cloudinit_extra_cmds"`
 	VMEnableVirtioConsole        bool     `json:"vm_enable_virtio_console"`
+	// VMFullDiskCopy copies the whole prebuilt image for each VM instead of
+	// giving it a qcow2 overlay. Only for cloud-hypervisor without
+	// backing_files support.
+	VMFullDiskCopy bool `json:"vm_full_disk_copy"`
 
 	logger    hclog.Logger
 	inventory *Inventory
