@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"sync"
 	"text/template"
 	"time"
@@ -143,7 +142,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 	}
 
 	instanceIndex := subnetBase / stepSize
-	instanceName := "fleetingd" + strconv.Itoa(instanceIndex)
+	instanceName := instanceGroup.instanceName(instanceIndex)
 
 	// Generate random mac address
 	randomBytes := make([]byte, 4)
@@ -356,7 +355,7 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 	i.ipamSlots[instanceGroup.MakeAddress(subnetBase)+"/30"] = struct{}{}
 
 	instanceIndex := subnetBase / stepSize
-	instanceName := "fleetingd" + strconv.Itoa(instanceIndex)
+	instanceName := instanceGroup.instanceName(instanceIndex)
 
 	// Generate random mac address
 	randomBytes := make([]byte, 4)
@@ -654,6 +653,8 @@ func (i *Inventory) ApplyNftables(instanceGroup *InstanceGroup) error {
 	}
 
 	type nftablesTemplateArgs struct {
+		Name            string
+		Subnet          string
 		EgressInterface string
 		Instances       []nftablesTemplateInstanceInfo
 	}
@@ -664,6 +665,8 @@ func (i *Inventory) ApplyNftables(instanceGroup *InstanceGroup) error {
 	}
 
 	templateArgs := nftablesTemplateArgs{
+		Name:            instanceGroup.Name,
+		Subnet:          instanceGroup.VMSubnet,
 		EgressInterface: instanceGroup.EgressInterface,
 		Instances:       []nftablesTemplateInstanceInfo{},
 	}

@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -18,6 +22,10 @@ const VMPrefix = "172.16.120."
 const MaxIPAMSlots = 255 / 4
 
 type InstanceGroup struct {
+	// Name tells groups on one host apart: it is the group's ID and prefixes
+	// its VMs, tap devices and nftables tables. Default "fleetingd". Each
+	// group needs its own name, vm_subnet and vm_disk_directory.
+	Name                         string   `json:"name"`
 	EgressInterface              string   `json:"egress_interface"`
 	VMDiskDir                    string   `json:"vm_disk_directory"`
 	VMSubnet                     string   `json:"vm_subnet"`
@@ -38,6 +46,46 @@ type InstanceGroup struct {
 
 	logger    hclog.Logger
 	inventory *Inventory
+	lockFile  *os.File
+}
+
+// Tap device names are at most 15 bytes: the name plus a two-digit index.
+var validName = regexp.MustCompile(`^[a-z][a-z0-9]{0,9}$`)
+
+// validate fills in defaults and checks the group's own settings.
+func (i *InstanceGroup) validate() error {
+	if i.Name == "" {
+		i.Name = "fleetingd"
+	}
+	if !validName.MatchString(i.Name) {
+		return fmt.Errorf("name %q: want 1-10 lowercase letters and digits, starting with a letter", i.Name)
+	}
+	if i.VMSubnet == "" {
+		i.VMSubnet = VMPrefix
+	}
+	if ip := net.ParseIP(i.VMSubnet + "0").To4(); ip == nil || !strings.HasSuffix(i.VMSubnet, ".") || strings.Count(i.VMSubnet, ".") != 3 {
+		return fmt.Errorf("vm_subnet %q: want the first three octets of a /24 and a dot, like %q", i.VMSubnet, VMPrefix)
+	}
+	return nil
+}
+
+// lockDiskDir keeps a second group off this vm_disk_directory: each group
+// clears its working directory and rebuilds its image on start.
+func (i *InstanceGroup) lockDiskDir() error {
+	f, err := os.OpenFile(filepath.Join(i.VMDiskDir, ".fleetingd.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		f.Close()
+		return fmt.Errorf("vm_disk_directory %s is in use by another fleetingd group; give each group its own", i.VMDiskDir)
+	}
+	i.lockFile = f
+	return nil
+}
+
+func (i *InstanceGroup) instanceName(index int) string {
+	return i.Name + strconv.Itoa(index)
 }
 
 func (i *InstanceGroup) Init(ctx context.Context, logger hclog.Logger, settings provider.Settings) (provider.ProviderInfo, error) {
@@ -45,7 +93,10 @@ func (i *InstanceGroup) Init(ctx context.Context, logger hclog.Logger, settings 
 	// Preflight checks
 	//
 
-	i.logger = logger.Named("fleetingd")
+	if err := i.validate(); err != nil {
+		return provider.ProviderInfo{}, err
+	}
+	i.logger = logger.Named(i.Name)
 
 	i.inventory = NewInventory()
 
@@ -68,9 +119,12 @@ func (i *InstanceGroup) Init(ctx context.Context, logger hclog.Logger, settings 
 	if err != nil {
 		return provider.ProviderInfo{}, fmt.Errorf("'%s' was specified as vm_disk_directory in the settings but is not writable: %w", i.VMDiskDir, err)
 	}
+	if err := i.lockDiskDir(); err != nil {
+		return provider.ProviderInfo{}, err
+	}
 
 	return provider.ProviderInfo{
-		ID:        "fleetingd",
+		ID:        i.Name,
 		MaxSize:   MaxIPAMSlots,
 		Version:   Version.Version,
 		BuildInfo: "TBD",
