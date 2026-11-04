@@ -36,6 +36,9 @@ type InstanceInfo struct {
 type Inventory struct {
 	lock     *sync.RWMutex
 	prebuild *sync.Once
+	// prebuildErr is the prebuild's result, for every caller of
+	// EnsurePrebuild and not only the one that ran it.
+	prebuildErr error
 
 	// Stop accepting requests when this is true
 	shuttingDown bool
@@ -86,16 +89,23 @@ func (i *Inventory) RunPrebuild(instanceGroup *InstanceGroup) error {
 	return nil
 }
 
-func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
-	var err error
-
+// EnsurePrebuild builds the image once and returns that build's result.
+// Callers that arrive while it runs wait for it.
+func (i *Inventory) EnsurePrebuild(instanceGroup *InstanceGroup) error {
 	i.prebuild.Do(func() {
-		err = i.RunPrebuild(instanceGroup)
+		i.prebuildErr = i.RunPrebuild(instanceGroup)
+		if i.prebuildErr != nil {
+			instanceGroup.logger.Error("Prebuild failed", "err", i.prebuildErr)
+		}
 	})
-	if err != nil {
-		instanceGroup.logger.Error("Prebuild failed", err)
+	return i.prebuildErr
+}
+
+func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
+	if err := i.EnsurePrebuild(instanceGroup); err != nil {
 		return err
 	}
+	var err error
 
 	i.lock.RLock()
 	takenSlots := len(i.ipamSlots)

@@ -43,11 +43,19 @@ type InstanceGroup struct {
 	// published updates since the prebuild; those then wait for the next
 	// prebuild (a runner restart).
 	VMPackageUpgrade *bool `json:"vm_package_upgrade"`
+	// VMPrebuildOnStart builds the image when the plugin starts instead of
+	// on the first job, after prebuildGrace so that short-lived starts
+	// (fleetci check, config probes) end before it begins.
+	VMPrebuildOnStart bool `json:"vm_prebuild_on_start"`
 
 	logger    hclog.Logger
 	inventory *Inventory
 	lockFile  *os.File
 }
+
+// prebuildGrace delays vm_prebuild_on_start past processes that only Init
+// a plugin and exit, such as fleetci check.
+var prebuildGrace = 10 * time.Second
 
 // Tap device names are at most 15 bytes: the name plus a two-digit index.
 var validName = regexp.MustCompile(`^[a-z][a-z0-9]{0,9}$`)
@@ -121,6 +129,14 @@ func (i *InstanceGroup) Init(ctx context.Context, logger hclog.Logger, settings 
 	}
 	if err := i.lockDiskDir(); err != nil {
 		return provider.ProviderInfo{}, err
+	}
+
+	if i.VMPrebuildOnStart {
+		go func() {
+			time.Sleep(prebuildGrace)
+			i.logger.Info("building the image before the first VM is asked for")
+			_ = i.inventory.EnsurePrebuild(i)
+		}()
 	}
 
 	return provider.ProviderInfo{

@@ -9,8 +9,10 @@
 > - a qcow2 overlay per VM instead of a full copy of the image
 >   (`vm_full_disk_copy = true` restores the copy);
 > - `vm_package_upgrade = false` to skip apt update and upgrade on every boot;
+> - `vm_prebuild_on_start = true` to build the image when the plugin starts,
+>   not when the first job arrives;
 > - a fix for a failed VM start, which kept the inventory lock and the
->   address slot.
+>   address slot, and for a failed prebuild, which only its first caller saw.
 >
 > The rest of this README is upstream's.
 
@@ -219,4 +221,7 @@ You can run `fleeting-plugin-fleetingd licenses` to view the software's and depe
 
       # fork: apt update and upgrade in every VM on boot (the prebuild does both)
       vm_package_upgrade = true
+
+      # fork: build the image 10s after the plugin starts instead of on the first job
+      vm_prebuild_on_start = false
 ```
