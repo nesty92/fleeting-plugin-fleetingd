@@ -30,6 +30,11 @@ type InstanceGroup struct {
 	// giving it a qcow2 overlay. Only for cloud-hypervisor without
 	// backing_files support.
 	VMFullDiskCopy bool `json:"vm_full_disk_copy"`
+	// VMPackageUpgrade runs apt update and upgrade in every VM on boot.
+	// Default true. false saves 3 s per VM, or more when Ubuntu has
+	// published updates since the prebuild; those then wait for the next
+	// prebuild (a runner restart).
+	VMPackageUpgrade *bool `json:"vm_package_upgrade"`
 
 	logger    hclog.Logger
 	inventory *Inventory

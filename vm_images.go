@@ -249,9 +249,11 @@ func (i *InstanceGroup) createUserdata(instanceName string, macAddress string, i
 		Gateway                string
 		Netmask                string
 		SSHAuthorizedPublicKey string
+		PackageUpgrade         bool
 	}
 
 	templateInput := userDataTemplateInput{
+		PackageUpgrade:         i.packageUpgrade(),
 		InstanceName:           instanceName,
 		MACAddress:             macAddress,
 		IP:                     ip,
@@ -531,4 +533,10 @@ func (i *InstanceGroup) diskArg(path string) string {
 		return fmt.Sprintf("path=%s,image_type=qcow2", path)
 	}
 	return fmt.Sprintf("path=%s,image_type=qcow2,backing_files=on", path)
+}
+
+// packageUpgrade is whether each VM runs apt update and upgrade on boot.
+// Default yes; the prebuild already did both when the image was built.
+func (i *InstanceGroup) packageUpgrade() bool {
+	return i.VMPackageUpgrade == nil || *i.VMPackageUpgrade
 }
