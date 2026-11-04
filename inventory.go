@@ -137,6 +137,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 	// Generate SSH key
 	pubKey, privKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
 		return err
 	}
@@ -148,6 +149,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 	randomBytes := make([]byte, 4)
 	_, err = rand.Read(randomBytes)
 	if err != nil {
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
 		return err
 	}
@@ -172,6 +174,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 		"/30",
 		pubKey)
 	if err != nil {
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
 		return err
 	}
@@ -179,12 +182,14 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 	// Create copy of qcow image
 	overlayPath, err := instanceGroup.copyImage(instanceName)
 	if err != nil {
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
 		return err
 	}
 
 	kernelFilePath, err := instanceGroup.getKernelFilePath()
 	if err != nil {
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
 		return err
 	}
@@ -222,6 +227,12 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 	instanceGroup.logger.Info("starting instance VM", "instance", instanceName)
 	err = hypervisorCommand.Start()
 	if err != nil {
+		// Nothing started: give back the slot and the lock, drop the files.
+		instanceCancelFunc()
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
+		i.lock.Unlock()
+		_ = os.Remove(overlayPath)
+		_ = os.Remove(userdataPath)
 		return err
 	}
 
@@ -351,6 +362,7 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 	randomBytes := make([]byte, 4)
 	_, err := rand.Read(randomBytes)
 	if err != nil {
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
 		return err
 	}
@@ -374,6 +386,7 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 		hostTapIP,
 		"/30")
 	if err != nil {
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
 		return err
 	}
@@ -387,6 +400,7 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 
 	kernelFilePath, err := instanceGroup.getKernelFilePath()
 	if err != nil {
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
 		return err
 	}
@@ -423,6 +437,11 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 	instanceGroup.logger.Info("starting instance VM", "instance", instanceName)
 	err = hypervisorCommand.Start()
 	if err != nil {
+		// Nothing started: give back the slot and the lock, drop the seed.
+		instanceCancelFunc()
+		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
+		i.lock.Unlock()
+		_ = os.Remove(userdataPath)
 		return err
 	}
 
