@@ -15,6 +15,8 @@
 > - `vm_package_upgrade = false` to skip apt update and upgrade on every boot;
 > - `vm_prebuild_on_start = true` to build the image when the plugin starts,
 >   not when the first job arrives;
+> - `vm_snapshot = true` to restore VMs from a snapshot instead of booting
+>   them: ready for SSH in 0.3–0.6 s instead of 6–10 s (see `snapshot.go`);
 > - a fix for a failed VM start, which kept the inventory lock and the
 >   address slot, and for a failed prebuild, which only its first caller saw.
 >
@@ -232,4 +234,8 @@ You can run `fleeting-plugin-fleetingd licenses` to view the software's and depe
 
       # fork: build the image 10s after the plugin starts instead of on the first job
       vm_prebuild_on_start = false
+
+      # fork: restore VMs from a snapshot of a booted one, taken once per image
+      # and VM size after the prebuild. Falls back to booting if it can't be made.
+      vm_snapshot = false
 ```

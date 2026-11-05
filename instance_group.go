@@ -50,6 +50,10 @@ type InstanceGroup struct {
 	// on the first job, after prebuildGrace so that short-lived starts
 	// (fleetci check, config probes) end before it begins.
 	VMPrebuildOnStart bool `json:"vm_prebuild_on_start"`
+	// VMSnapshot restores VMs from a snapshot of a booted one instead of
+	// booting them: ready in under a second instead of 5-7. The snapshot is
+	// taken once per image and VM size, after the prebuild. See snapshot.go.
+	VMSnapshot bool `json:"vm_snapshot"`
 
 	logger    hclog.Logger
 	inventory *Inventory
@@ -59,6 +63,8 @@ type InstanceGroup struct {
 	imagePath  string
 	kernelPath string
 	imageHold  *os.File
+	// snapshot is the snapshot VMs are restored from, with vm_snapshot.
+	snapshot *snapshot
 }
 
 // prebuildGrace delays vm_prebuild_on_start past processes that only Init
@@ -183,7 +189,7 @@ func (i *InstanceGroup) Increase(ctx context.Context, n int) (succeeded int, err
 	// Try to boot more instances
 
 	for counter := 0; counter < n; counter++ {
-		err := i.inventory.BootInstance(i)
+		err := i.inventory.BootInstance(i, nil)
 		if err != nil {
 			i.logger.Error("instance boot error", "error", err)
 			return counter, err

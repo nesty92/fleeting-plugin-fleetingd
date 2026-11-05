@@ -32,6 +32,11 @@ type InstanceInfo struct {
 
 	SSHPublicKey  ed25519.PublicKey
 	SSHPrivateKey ed25519.PrivateKey
+
+	// template is a snapshot's template VM, not one the runner asked for.
+	template bool
+	// pending is a restored VM still taking its own identity.
+	pending bool
 }
 
 type Inventory struct {
@@ -74,7 +79,16 @@ func (i *Inventory) RunPrebuild(instanceGroup *InstanceGroup) error {
 	}
 
 	// The shared image: built once per host and input, reused by every group
-	return instanceGroup.ensureImage()
+	if err := instanceGroup.ensureImage(); err != nil {
+		return err
+	}
+	if instanceGroup.VMSnapshot {
+		if err := instanceGroup.ensureSnapshot(); err != nil {
+			// Booting still works, only slower.
+			instanceGroup.logger.Error("no snapshot, VMs boot instead", "err", err)
+		}
+	}
+	return nil
 }
 
 // EnsurePrebuild builds the image once and returns that build's result.
@@ -89,9 +103,17 @@ func (i *Inventory) EnsurePrebuild(instanceGroup *InstanceGroup) error {
 	return i.prebuildErr
 }
 
-func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
-	if err := i.EnsurePrebuild(instanceGroup); err != nil {
-		return err
+// BootInstance starts a VM: booted from the image, or with vm_snapshot
+// restored from the group's snapshot. opts may be nil.
+func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions) error {
+	if !opts.template() {
+		if err := i.EnsurePrebuild(instanceGroup); err != nil {
+			return err
+		}
+	}
+	snap := instanceGroup.snapshot
+	if opts.template() {
+		snap = nil
 	}
 	var err error
 
@@ -129,26 +151,34 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 		subnetBase += 4
 	}
 
-	i.ipamSlots[instanceGroup.MakeAddress(subnetBase)+"/30"] = struct{}{}
+	slot := instanceGroup.MakeAddress(subnetBase) + "/30"
+	i.ipamSlots[slot] = struct{}{}
+	// fail gives back what this call took while still holding the lock.
+	var files []string
+	fail := func(err error) error {
+		delete(i.ipamSlots, slot)
+		i.lock.Unlock()
+		for _, f := range files {
+			_ = os.RemoveAll(f)
+		}
+		return err
+	}
 
 	// Generate SSH key
 	pubKey, privKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
-		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
-		i.lock.Unlock()
-		return err
+		return fail(err)
 	}
 
 	instanceIndex := subnetBase / stepSize
 	instanceName := instanceGroup.instanceName(instanceIndex)
+	workdir := filepath.Join(instanceGroup.VMDiskDir, vmWorkdir)
 
 	// Generate random mac address
 	randomBytes := make([]byte, 4)
 	_, err = rand.Read(randomBytes)
 	if err != nil {
-		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
-		i.lock.Unlock()
-		return err
+		return fail(err)
 	}
 	randomPart := hex.EncodeToString(randomBytes)
 
@@ -159,90 +189,126 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 		randomPart[2:4],
 		randomPart[4:6],
 		randomPart[6:])
+	if snap != nil {
+		// The restored guest keeps the template's network card.
+		instanceMac = snap.MAC
+	}
 
 	hostTapIP := instanceGroup.MakeAddress(subnetBase + 1)
 	instanceTapIP := instanceGroup.MakeAddress(subnetBase + 2)
 
-	// Generate userdata image
-	userdataPath, err := instanceGroup.createUserdata(instanceName,
-		instanceMac,
-		instanceTapIP,
-		hostTapIP,
-		"/30",
-		pubKey)
-	if err != nil {
-		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
-		i.lock.Unlock()
-		return err
-	}
-
-	// Create copy of qcow image
-	overlayPath, err := instanceGroup.copyImage(instanceName)
-	if err != nil {
-		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
-		i.lock.Unlock()
-		return err
-	}
-
-	kernelFilePath, err := instanceGroup.bootKernel()
-	if err != nil {
-		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
-		i.lock.Unlock()
-		return err
-	}
-
-	// Start instance
 	instanceContext, instanceCancelFunc := context.WithCancel(context.Background())
+	var hypervisorCommand *exec.Cmd
+	var vsockPath string
 
-	hypervisorCommand := exec.CommandContext(instanceContext, "cloud-hypervisor",
-		"--kernel",
-		kernelFilePath,
-		"--disk",
-		instanceGroup.diskArg(overlayPath),
-		fmt.Sprintf("path=%s,readonly=on,image_type=raw", userdataPath),
-		"--cpus",
-		fmt.Sprintf("boot=%d", instanceGroup.VMNumCPUCores),
-		"--memory",
-		fmt.Sprintf("size=%dM", instanceGroup.VMMemoryMegabytes),
-		"--net",
-		fmt.Sprintf("tap=%s,mac=%s,ip=%s,mask=255.255.255.252", instanceName, instanceMac, hostTapIP),
-		"--balloon",
-		"size=0,free_page_reporting=on",
-		"--cmdline",
-		"console=hvc0 root=/dev/vda1 rw",
-		"--landlock",
-	)
+	if snap != nil {
+		overlayPath, err := instanceGroup.makeDisk(filepath.Join(workdir, instanceName+".img"), snap.Disk)
+		files = append(files, overlayPath)
+		if err != nil {
+			instanceCancelFunc()
+			return fail(err)
+		}
+		vsockPath = filepath.Join(workdir, instanceName+".vsock")
+		files = append(files, vsockPath)
+		snapDir, err := instanceGroup.prepareRestore(instanceName, hostTapIP, overlayPath)
+		files = append(files, filepath.Join(workdir, instanceName+"_snap"))
+		if err != nil {
+			instanceCancelFunc()
+			return fail(err)
+		}
+		hypervisorCommand = exec.CommandContext(instanceContext, "cloud-hypervisor",
+			"--restore", fmt.Sprintf("source_url=file://%s,memory_restore_mode=copyonwrite,resume=true", snapDir))
+	} else {
+		var userdataPath, overlayPath string
+		if opts.template() {
+			userdataPath, err = instanceGroup.writeSeed(filepath.Join(opts.Template, "seed.img"), "user-data-snapshot.tpl",
+				instanceName, instanceMac, instanceTapIP, hostTapIP, "/30", pubKey)
+		} else {
+			userdataPath, err = instanceGroup.createUserdata(instanceName, instanceMac, instanceTapIP, hostTapIP, "/30", pubKey)
+		}
+		if !opts.template() {
+			files = append(files, userdataPath)
+		}
+		if err != nil {
+			instanceCancelFunc()
+			return fail(err)
+		}
 
-	if instanceGroup.VMEnableVirtioConsole {
-		// Enable console
-		consolePath := filepath.Join(instanceGroup.VMDiskDir, vmWorkdir, fmt.Sprintf("%s_console", instanceName))
+		if opts.template() {
+			overlayPath, err = instanceGroup.makeDisk(filepath.Join(opts.Template, "disk.qcow2"), instanceGroup.imagePath)
+		} else {
+			overlayPath, err = instanceGroup.copyImage(instanceName)
+			files = append(files, overlayPath)
+		}
+		if err != nil {
+			instanceCancelFunc()
+			return fail(err)
+		}
 
-		hypervisorCommand.Args = append(hypervisorCommand.Args, "--console",
-			fmt.Sprintf("file=%s", consolePath))
+		kernelFilePath, err := instanceGroup.bootKernel()
+		if err != nil {
+			instanceCancelFunc()
+			return fail(err)
+		}
+
+		hypervisorCommand = exec.CommandContext(instanceContext, "cloud-hypervisor",
+			"--kernel",
+			kernelFilePath,
+			"--disk",
+			instanceGroup.diskArg(overlayPath),
+			fmt.Sprintf("path=%s,readonly=on,image_type=raw", userdataPath),
+			"--cpus",
+			fmt.Sprintf("boot=%d", instanceGroup.VMNumCPUCores),
+			"--memory",
+			fmt.Sprintf("size=%dM", instanceGroup.VMMemoryMegabytes),
+			"--net",
+			fmt.Sprintf("tap=%s,mac=%s,ip=%s,mask=255.255.255.252", instanceName, instanceMac, hostTapIP),
+			"--cmdline",
+			"console=hvc0 root=/dev/vda1 rw",
+			"--landlock",
+		)
+		if opts.template() {
+			// Paused and saved over the API; the agent listens on vsock.
+			vsockPath = filepath.Join(opts.Template, "vsock")
+			hypervisorCommand.Args = append(hypervisorCommand.Args,
+				"--api-socket", "path="+filepath.Join(opts.Template, "api.sock"),
+				"--vsock", "cid=3,socket="+vsockPath,
+				"--landlock-rules", fmt.Sprintf("path=%s,access=rw", opts.Template))
+		} else {
+			hypervisorCommand.Args = append(hypervisorCommand.Args, "--balloon", "size=0,free_page_reporting=on")
+		}
+
+		if instanceGroup.VMEnableVirtioConsole {
+			// Enable console
+			consolePath := filepath.Join(workdir, fmt.Sprintf("%s_console", instanceName))
+
+			hypervisorCommand.Args = append(hypervisorCommand.Args, "--console",
+				fmt.Sprintf("file=%s", consolePath))
+		} else if opts.template() {
+			hypervisorCommand.Args = append(hypervisorCommand.Args, "--console", "off")
+		}
+
+		if !instanceGroup.VMFullDiskCopy {
+			// landlock confines cloud-hypervisor to the paths it is given; the
+			// overlay's backing image is read through the overlay.
+			hypervisorCommand.Args = append(hypervisorCommand.Args,
+				"--landlock-rules", fmt.Sprintf("path=%s,access=r", instanceGroup.imagePath))
+		}
 	}
 
-	if !instanceGroup.VMFullDiskCopy {
-		// landlock confines cloud-hypervisor to the paths it is given; the
-		// overlay's backing image is read through the overlay.
-		hypervisorCommand.Args = append(hypervisorCommand.Args,
-			"--landlock-rules", fmt.Sprintf("path=%s,access=r", instanceGroup.imagePath))
-	}
-	stderrPath := filepath.Join(instanceGroup.VMDiskDir, vmWorkdir, instanceName+"_stderr")
+	stderrPath := filepath.Join(workdir, instanceName+"_stderr")
 	if f, ferr := os.Create(stderrPath); ferr == nil {
 		hypervisorCommand.Stderr = f
 		defer f.Close()
 	}
 
-	instanceGroup.logger.Info("starting instance VM", "instance", instanceName)
+	instanceGroup.logger.Info("starting instance VM", "instance", instanceName, "restore", snap != nil, "template", opts.template())
+	started := time.Now()
 	err = hypervisorCommand.Start()
 	if err != nil {
 		// Nothing started: give back the slot and the lock, drop the files.
 		instanceCancelFunc()
-		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
-		i.lock.Unlock()
-		_ = os.Remove(overlayPath)
-		_ = os.Remove(userdataPath)
-		return err
+		return fail(err)
 	}
 
 	go func() {
@@ -260,35 +326,32 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 
 		instanceGroup.logger.Info("instance process finished. cleaning up.", "instance", instanceName)
 
-		// Delete overlay and cloudinit data
-		err = os.Remove(overlayPath)
-		if err != nil {
-			instanceGroup.logger.Error("error deleting overlay after instance has been stopped", err)
-		}
-
-		err = os.Remove(userdataPath)
-		if err != nil {
-			instanceGroup.logger.Error("error deleting userdata after instance has been stopped", err)
+		// Delete this VM's disk, seed and snapshot copy. A template's live in
+		// the snapshot it was for.
+		for _, f := range files {
+			if err := os.RemoveAll(f); err != nil {
+				instanceGroup.logger.Error("error deleting instance files after it stopped", "file", f, "err", err)
+			}
 		}
 
 		i.lock.Lock()
 
 		// Clear instance's IPAM lock
-		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
+		delete(i.ipamSlots, slot)
 
 		// Clear instance from inventory
 		delete(i.instances, instanceName)
 
 		i.lock.Unlock()
 
-		err = i.ApplyNftables(instanceGroup)
+		err := i.ApplyNftables(instanceGroup)
 		if err != nil {
 			instanceGroup.logger.Error("error applying nftables rules", err)
 		}
 	}()
 
 	// Update inventory
-	i.instances[instanceName] = &InstanceInfo{
+	info := &InstanceInfo{
 		Name:                      instanceName,
 		InstanceContextCancelFunc: instanceCancelFunc,
 
@@ -299,6 +362,13 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 
 		SSHPublicKey:  pubKey,
 		SSHPrivateKey: privKey,
+
+		template: opts.template(),
+		pending:  snap != nil,
+	}
+	i.instances[instanceName] = info
+	if opts != nil {
+		opts.Info = info
 	}
 
 	// Release lock for nftables
@@ -329,7 +399,37 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 	}
 
 	// Render and apply nftables rules (wait for tap interface)
-	return i.ApplyNftables(instanceGroup)
+	if err := i.ApplyNftables(instanceGroup); err != nil {
+		return err
+	}
+	if snap == nil {
+		return nil
+	}
+
+	// A restored VM still has the template's address and identity: give it
+	// its own before anything connects.
+	script, err := identityScript(instanceName, instanceTapIP, hostTapIP, pubKey)
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		for {
+			_, err = runAgent(ctx, vsockPath, script)
+			if err == nil || ctx.Err() != nil {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		cancel()
+	}
+	if err != nil {
+		instanceGroup.logger.Error("restored VM did not take its identity", "instance", instanceName, "err", err)
+		instanceCancelFunc()
+		return fmt.Errorf("restoring %s: %w", instanceName, err)
+	}
+	i.lock.Lock()
+	info.pending = false
+	i.lock.Unlock()
+	instanceGroup.logger.Info("restored instance VM", "instance", instanceName, "took", time.Since(started).Round(time.Millisecond).String())
+	return nil
 }
 
 func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
@@ -606,8 +706,10 @@ func (i *Inventory) GetAllInstances() []string {
 
 	i.lock.RLock()
 
-	for name := range i.instances {
-		instanceNames = append(instanceNames, name)
+	for name, instance := range i.instances {
+		if !instance.template {
+			instanceNames = append(instanceNames, name)
+		}
 	}
 
 	i.lock.RUnlock()
@@ -621,12 +723,18 @@ func (i *Inventory) GetConnectInfo(name string) (*provider.ConnectInfo, error) {
 	i.lock.RLock()
 
 	instance, ok := i.instances[name]
-	if !ok {
+	if !ok || instance.template {
+		i.lock.RUnlock()
 		return nil, errors.New("instance not found")
+	}
+	if instance.pending {
+		i.lock.RUnlock()
+		return nil, errors.New("instance is still being restored")
 	}
 
 	marshalledKey, err := ssh.MarshalPrivateKey(instance.SSHPrivateKey, "fleetingd")
 	if err != nil {
+		i.lock.RUnlock()
 		return nil, err
 	}
 

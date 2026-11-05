@@ -168,15 +168,18 @@ func (i *InstanceGroup) ensureImages() error {
 }
 
 func (i *InstanceGroup) copyImage(instanceName string) (string, error) {
-	// A VM's own disk on top of the shared prebuilt image
-	if i.imagePath == "" {
+	return i.makeDisk(filepath.Join(i.VMDiskDir, vmWorkdir, instanceName+".img"), i.imagePath)
+}
+
+// makeDisk creates a VM's own disk at copyPath on top of base.
+func (i *InstanceGroup) makeDisk(copyPath, base string) (string, error) {
+	if base == "" {
 		return "", errors.New("no prebuilt image")
 	}
-	copyPath := filepath.Join(i.VMDiskDir, vmWorkdir, instanceName+".img")
 	size := fmt.Sprintf("%dG", i.VMDiskSizeGB)
 
 	if i.VMFullDiskCopy {
-		if out, err := exec.Command("cp", "-f", i.imagePath, copyPath).CombinedOutput(); err != nil {
+		if out, err := exec.Command("cp", "-f", base, copyPath).CombinedOutput(); err != nil {
 			return "", fmt.Errorf("copying disk image: %w: %s", err, out)
 		}
 		if out, err := exec.Command("qemu-img", "resize", "-q", copyPath, size).CombinedOutput(); err != nil {
@@ -191,7 +194,7 @@ func (i *InstanceGroup) copyImage(instanceName string) (string, error) {
 	// a new one.
 	_ = os.Remove(copyPath)
 	overlayCommand := exec.Command("qemu-img", "create", "-q", "-f", "qcow2",
-		"-b", i.imagePath, "-F", "qcow2", copyPath, size)
+		"-b", base, "-F", "qcow2", copyPath, size)
 	if out, err := overlayCommand.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("creating disk overlay: %w: %s", err, out)
 	}
@@ -209,6 +212,13 @@ func (i *InstanceGroup) getKernelFilePath() (string, error) {
 }
 
 func (i *InstanceGroup) createUserdata(instanceName string, macAddress string, ip string, gateway string, netmask string, sshAuthorizedPublicKey ed25519.PublicKey) (string, error) {
+	return i.writeSeed(filepath.Join(i.VMDiskDir, vmWorkdir, fmt.Sprintf("%s_userdata.img", instanceName)), "user-data.tpl",
+		instanceName, macAddress, ip, gateway, netmask, sshAuthorizedPublicKey)
+}
+
+// writeSeed writes a VM's cloud-init seed to userdataPath, with the user
+// data from the template userDataTemplate.
+func (i *InstanceGroup) writeSeed(userdataPath, userDataTemplate string, instanceName string, macAddress string, ip string, gateway string, netmask string, sshAuthorizedPublicKey ed25519.PublicKey) (string, error) {
 	// Render userdata
 
 	sshKey, err := ssh.NewPublicKey(sshAuthorizedPublicKey)
@@ -224,10 +234,12 @@ func (i *InstanceGroup) createUserdata(instanceName string, macAddress string, i
 		Netmask                string
 		SSHAuthorizedPublicKey string
 		PackageUpgrade         bool
+		Subnet                 string
 	}
 
 	templateInput := userDataTemplateInput{
 		PackageUpgrade:         i.packageUpgrade(),
+		Subnet:                 i.VMSubnet,
 		InstanceName:           instanceName,
 		MACAddress:             macAddress,
 		IP:                     ip,
@@ -240,8 +252,6 @@ func (i *InstanceGroup) createUserdata(instanceName string, macAddress string, i
 	if err != nil {
 		return "", err
 	}
-
-	userdataPath := filepath.Join(i.VMDiskDir, vmWorkdir, fmt.Sprintf("%s_userdata.img", instanceName))
 
 	diskFile, err := file.CreateFromPath(userdataPath, 10*1024*1024)
 	if err != nil {
@@ -287,7 +297,7 @@ func (i *InstanceGroup) createUserdata(instanceName string, macAddress string, i
 	}
 	defer userDataFile.Close()
 
-	err = templates.ExecuteTemplate(userDataFile, "user-data.tpl", templateInput)
+	err = templates.ExecuteTemplate(userDataFile, userDataTemplate, templateInput)
 	if err != nil {
 		return "", err
 	}

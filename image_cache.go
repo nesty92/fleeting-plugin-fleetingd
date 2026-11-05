@@ -182,7 +182,13 @@ func (i *InstanceGroup) removeUnusedImages(keep string) {
 		}
 		if unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil {
 			_ = os.Remove(image)
-			_ = os.Remove(strings.TrimSuffix(image, ".qcow2") + ".vmlinuz")
+			base := strings.TrimSuffix(image, ".qcow2")
+			_ = os.Remove(base + ".vmlinuz")
+			// Its snapshots: no VM uses them once no group holds the image.
+			snaps, _ := filepath.Glob(filepath.Join(i.imageDir(), "snapshot-"+strings.TrimPrefix(filepath.Base(base), "prebuilt-")+"-*"))
+			for _, s := range snaps {
+				_ = os.RemoveAll(s)
+			}
 			i.logger.Info("removed an unused image", "image", filepath.Base(image))
 		}
 		f.Close()
