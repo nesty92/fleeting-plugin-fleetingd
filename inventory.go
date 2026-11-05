@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -72,21 +73,8 @@ func (i *Inventory) RunPrebuild(instanceGroup *InstanceGroup) error {
 		return err
 	}
 
-	// Ensure disk images are present
-	err = instanceGroup.ensureImages()
-	if err != nil {
-		return err
-	}
-
-	// Run prebuild
-	instanceGroup.logger.Info("Triggering prebuild...")
-	err = instanceGroup.inventory.PrebuildInstance(instanceGroup)
-	if err != nil {
-		return err
-	}
-	instanceGroup.logger.Info("Prebuild finished.")
-
-	return nil
+	// The shared image: built once per host and input, reused by every group
+	return instanceGroup.ensureImage()
 }
 
 // EnsurePrebuild builds the image once and returns that build's result.
@@ -196,7 +184,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 		return err
 	}
 
-	kernelFilePath, err := instanceGroup.getKernelFilePath()
+	kernelFilePath, err := instanceGroup.bootKernel()
 	if err != nil {
 		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
@@ -233,6 +221,18 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 			fmt.Sprintf("file=%s", consolePath))
 	}
 
+	if !instanceGroup.VMFullDiskCopy {
+		// landlock confines cloud-hypervisor to the paths it is given; the
+		// overlay's backing image is read through the overlay.
+		hypervisorCommand.Args = append(hypervisorCommand.Args,
+			"--landlock-rules", fmt.Sprintf("path=%s,access=r", instanceGroup.imagePath))
+	}
+	stderrPath := filepath.Join(instanceGroup.VMDiskDir, vmWorkdir, instanceName+"_stderr")
+	if f, ferr := os.Create(stderrPath); ferr == nil {
+		hypervisorCommand.Stderr = f
+		defer f.Close()
+	}
+
 	instanceGroup.logger.Info("starting instance VM", "instance", instanceName)
 	err = hypervisorCommand.Start()
 	if err != nil {
@@ -251,7 +251,12 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup) error {
 		//
 
 		// Wait for VM to terminate (when context gets cancelled)
-		hypervisorCommand.Wait()
+		if werr := hypervisorCommand.Wait(); werr != nil && instanceContext.Err() == nil {
+			// Exited on its own, not stopped by us: say why.
+			out, _ := os.ReadFile(stderrPath)
+			instanceGroup.logger.Error("instance VM exited", "instance", instanceName, "err", werr, "stderr", lastLines(string(out), 5))
+		}
+		_ = os.Remove(stderrPath)
 
 		instanceGroup.logger.Info("instance process finished. cleaning up.", "instance", instanceName)
 
@@ -400,14 +405,9 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 		return err
 	}
 
-	diskImageFileName, err := getFilenameFromURL(diskImageURL)
-	if err != nil {
-		return err
-	}
-	diskImageFilePath := filepath.Join(instanceGroup.VMDiskDir, diskImageFileName)
-	decompressedPath := addSuffixToFilepath(diskImageFilePath, decompressedSuffix)
+	decompressedPath := instanceGroup.imagePath
 
-	kernelFilePath, err := instanceGroup.getKernelFilePath()
+	kernelFilePath, err := instanceGroup.bootKernel()
 	if err != nil {
 		delete(i.ipamSlots, instanceGroup.MakeAddress(subnetBase)+"/30")
 		i.lock.Unlock()
@@ -716,4 +716,13 @@ func (i *Inventory) ApplyNftables(instanceGroup *InstanceGroup) error {
 	}
 
 	return nil
+}
+
+// lastLines is the end of a process's output, for a log line.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, " | ")
 }

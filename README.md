@@ -6,8 +6,12 @@
 >
 > - `name`, a free `vm_subnet` and a lock on `vm_disk_directory`, so several
 >   groups (VM sizes) can share one host;
-> - a qcow2 overlay per VM instead of a full copy of the image
->   (`vm_full_disk_copy = true` restores the copy);
+> - one prebuilt image for all of them in `vm_image_directory`, named by a
+>   hash of its inputs and built by whichever group needs it first. A new
+>   Ubuntu build or new commands make a new image, and running VMs keep the
+>   old one until it is unused. No 24 h restarts needed;
+> - a qcow2 overlay per VM instead of a full copy of the image, sized to
+>   the group's `vm_disk_size_gb` (`vm_full_disk_copy = true` restores the copy);
 > - `vm_package_upgrade = false` to skip apt update and upgrade on every boot;
 > - `vm_prebuild_on_start = true` to build the image when the plugin starts,
 >   not when the first job arrives;
@@ -210,6 +214,10 @@ You can run `fleeting-plugin-fleetingd licenses` to view the software's and depe
 
       # You can enable the virtio console file in the .instance_data subdirectory of vm_disk_directory
       vm_enable_virtio_console = false
+
+      # fork: downloads and prebuilt images, shared by all groups on the host
+      # (default: vm_disk_directory)
+      vm_image_directory = "/var/lib/fleetingd/images"
 
       # fork: tells groups on one host apart (ID, VM, tap and nftables names);
       # each group also needs its own vm_subnet and vm_disk_directory

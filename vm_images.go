@@ -72,7 +72,7 @@ func (i *InstanceGroup) ensureImages() error {
 		if err != nil {
 			return err
 		}
-		checksumFilePath := filepath.Join(i.VMDiskDir, checksumFileName+"_kernel")
+		checksumFilePath := filepath.Join(i.imageDir(), checksumFileName+"_kernel")
 
 		err = downloadFile(kernelSHA256SumsURL, checksumFilePath)
 		if err != nil {
@@ -117,7 +117,7 @@ func (i *InstanceGroup) ensureImages() error {
 	if err != nil {
 		return err
 	}
-	diskImageFilePath := filepath.Join(i.VMDiskDir, diskImageFileName)
+	diskImageFilePath := filepath.Join(i.imageDir(), diskImageFileName)
 
 	diskImageFileExists, err := checkFileExists(diskImageFilePath)
 	if err != nil {
@@ -130,7 +130,7 @@ func (i *InstanceGroup) ensureImages() error {
 		if err != nil {
 			return err
 		}
-		checksumFilePath := filepath.Join(i.VMDiskDir, checksumFileName+"_image")
+		checksumFilePath := filepath.Join(i.imageDir(), checksumFileName+"_image")
 
 		err = downloadFile(diskImageSHA256SumsURL, checksumFilePath)
 		if err != nil {
@@ -164,60 +164,34 @@ func (i *InstanceGroup) ensureImages() error {
 		i.logger.Info("Disk image download done.")
 	}
 
-	// Decompress image either way
-	// cloud-hypervisor can't read compressed QCOW2 images, so decompress the image first
-	i.logger.Info("Decompressing disk image...")
-
-	decompressedPath := addSuffixToFilepath(diskImageFilePath, decompressedSuffix)
-
-	imageDecompressionCommand := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", diskImageFilePath, decompressedPath)
-	err = imageDecompressionCommand.Run()
-	if err != nil {
-		return err
-	}
-
-	i.logger.Info("Disk image decompressed.")
-
-	// Expand available space
-	i.logger.Info("Resizing disk image...")
-
-	imageExpansionCommand := exec.Command("qemu-img", "resize", decompressedPath, fmt.Sprintf("%dG", i.VMDiskSizeGB))
-	err = imageExpansionCommand.Run()
-	if err != nil {
-		return err
-	}
-
-	i.logger.Info("Disk image resized.")
-
 	return nil
 }
 
 func (i *InstanceGroup) copyImage(instanceName string) (string, error) {
-	// Create a new copy of the base image
-
-	diskImageFileName, err := getFilenameFromURL(diskImageURL)
-	if err != nil {
-		return "", err
+	// A VM's own disk on top of the shared prebuilt image
+	if i.imagePath == "" {
+		return "", errors.New("no prebuilt image")
 	}
-	diskImageFilePath := filepath.Join(i.VMDiskDir, diskImageFileName)
-	decompressedPath := addSuffixToFilepath(diskImageFilePath, decompressedSuffix)
-
 	copyPath := filepath.Join(i.VMDiskDir, vmWorkdir, instanceName+".img")
+	size := fmt.Sprintf("%dG", i.VMDiskSizeGB)
 
 	if i.VMFullDiskCopy {
-		imageCopyCommand := exec.Command("cp", "-f", decompressedPath, copyPath)
-		if out, err := imageCopyCommand.CombinedOutput(); err != nil {
+		if out, err := exec.Command("cp", "-f", i.imagePath, copyPath).CombinedOutput(); err != nil {
 			return "", fmt.Errorf("copying disk image: %w: %s", err, out)
+		}
+		if out, err := exec.Command("qemu-img", "resize", "-q", copyPath, size).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("resizing disk image: %w: %s", err, out)
 		}
 		return copyPath, nil
 	}
 
-	// A qcow2 overlay on the prebuilt image: created in milliseconds, holds
-	// only what this VM writes. The prebuilt image is not touched again
-	// until the next prebuild, which happens with no VMs running.
+	// A qcow2 overlay: created in milliseconds, holds only what this VM
+	// writes, and may be larger than the image (cloud-init grows the root
+	// partition on boot). The image itself never changes; a rebuild writes
+	// a new one.
 	_ = os.Remove(copyPath)
 	overlayCommand := exec.Command("qemu-img", "create", "-q", "-f", "qcow2",
-		"-b", decompressedPath, "-F", "qcow2", copyPath)
+		"-b", i.imagePath, "-F", "qcow2", copyPath, size)
 	if out, err := overlayCommand.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("creating disk overlay: %w: %s", err, out)
 	}
@@ -231,7 +205,7 @@ func (i *InstanceGroup) getKernelFilePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(i.VMDiskDir, kernelFileName), nil
+	return filepath.Join(i.imageDir(), kernelFileName), nil
 }
 
 func (i *InstanceGroup) createUserdata(instanceName string, macAddress string, ip string, gateway string, netmask string, sshAuthorizedPublicKey ed25519.PublicKey) (string, error) {

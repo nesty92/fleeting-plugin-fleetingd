@@ -25,9 +25,12 @@ type InstanceGroup struct {
 	// Name tells groups on one host apart: it is the group's ID and prefixes
 	// its VMs, tap devices and nftables tables. Default "fleetingd". Each
 	// group needs its own name, vm_subnet and vm_disk_directory.
-	Name                         string   `json:"name"`
-	EgressInterface              string   `json:"egress_interface"`
-	VMDiskDir                    string   `json:"vm_disk_directory"`
+	Name            string `json:"name"`
+	EgressInterface string `json:"egress_interface"`
+	VMDiskDir       string `json:"vm_disk_directory"`
+	// VMImageDir holds the downloads and prebuilt images, shared by every
+	// group on the host. Default vm_disk_directory.
+	VMImageDir                   string   `json:"vm_image_directory"`
 	VMSubnet                     string   `json:"vm_subnet"`
 	VMNumCPUCores                uint64   `json:"vm_num_cpu_cores"`
 	VMMemoryMegabytes            uint64   `json:"vm_memory_mb"`
@@ -51,6 +54,11 @@ type InstanceGroup struct {
 	logger    hclog.Logger
 	inventory *Inventory
 	lockFile  *os.File
+	// The prebuilt image in use, its kernel, and the shared lock that keeps
+	// other builds from deleting it.
+	imagePath  string
+	kernelPath string
+	imageHold  *os.File
 }
 
 // prebuildGrace delays vm_prebuild_on_start past processes that only Init
@@ -67,6 +75,12 @@ func (i *InstanceGroup) validate() error {
 	}
 	if !validName.MatchString(i.Name) {
 		return fmt.Errorf("name %q: want 1-10 lowercase letters and digits, starting with a letter", i.Name)
+	}
+	if i.VMDiskSizeGB == 0 {
+		i.VMDiskSizeGB = 30
+	}
+	if i.VMDiskSizeGB < prebuildDiskGB {
+		return fmt.Errorf("vm_disk_size_gb %d: at least %d, the prebuilt image's size", i.VMDiskSizeGB, prebuildDiskGB)
 	}
 	if i.VMSubnet == "" {
 		i.VMSubnet = VMPrefix
