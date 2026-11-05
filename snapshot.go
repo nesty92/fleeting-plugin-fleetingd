@@ -115,11 +115,19 @@ func (i *InstanceGroup) ensureSnapshot() error {
 	}
 	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
 
-	s, err := loadSnapshot(dir)
-	if err == nil {
+	s, err := loadSnapshot(dir, i.imagePath)
+	switch {
+	case err == nil:
 		i.logger.Info("reusing the snapshot", "snapshot", filepath.Base(dir))
-	} else if s, err = i.buildSnapshot(dir); err != nil {
-		return err
+	case errors.Is(err, os.ErrNotExist):
+		// None yet.
+	default:
+		i.logger.Warn("rebuilding the snapshot", "snapshot", filepath.Base(dir), "why", err)
+	}
+	if err != nil {
+		if s, err = i.buildSnapshot(dir); err != nil {
+			return err
+		}
 	}
 	// Held for the group's lifetime, as the image is: a snapshot no group
 	// holds may be removed.
@@ -178,21 +186,35 @@ func removeSnapshotIfUnused(dir string) bool {
 	return true
 }
 
-func loadSnapshot(dir string) (*snapshot, error) {
+// loadSnapshot returns the snapshot in dir if it can be used with image.
+// Its config and disk hold absolute paths, so one whose directory moved
+// (an image directory moved or mounted elsewhere) or whose disk is no
+// longer an overlay on image is refused, and rebuilt.
+func loadSnapshot(dir, image string) (*snapshot, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if err != nil {
 		return nil, err
 	}
 	var s snapshot
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("snapshot %s: %w", dir, err)
 	}
 	for _, f := range []string{"snap/config.json", "snap/state.json", "disk.qcow2"} {
 		if ok, _ := checkFileExists(filepath.Join(dir, f)); !ok {
 			return nil, fmt.Errorf("snapshot %s lacks %s", dir, f)
 		}
 	}
+	if s.BuiltIn != dir+".tmp" {
+		return nil, fmt.Errorf("snapshot %s was built in %s, elsewhere", dir, s.BuiltIn)
+	}
 	s.Dir, s.Disk = dir, filepath.Join(dir, "disk.qcow2")
+	backing, err := qcow2Backing(s.Disk)
+	if err != nil {
+		return nil, err
+	}
+	if backing != image {
+		return nil, fmt.Errorf("snapshot %s: its disk is an overlay on %q, not on %s", dir, backing, image)
+	}
 	return &s, nil
 }
 
@@ -279,7 +301,7 @@ docker version --format '{{.Server.Version}}' >/dev/null`)
 		return nil, err
 	}
 	i.logger.Info("snapshot built", "snapshot", filepath.Base(dir), "took", time.Since(start).Round(time.Millisecond).String())
-	return loadSnapshot(dir)
+	return loadSnapshot(dir, i.imagePath)
 }
 
 // prepareRestore writes this VM's copy of the snapshot: its own disk, tap,
