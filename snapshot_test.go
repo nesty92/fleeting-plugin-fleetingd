@@ -109,3 +109,26 @@ func TestClockDrift(t *testing.T) {
 		t.Fatal("drift from output without it")
 	}
 }
+
+func TestDestroyUnknownOrHiddenInstance(t *testing.T) {
+	inv := NewInventory()
+	if err := inv.DestroyInstance("fd41-abc1"); err != nil {
+		t.Fatalf("an instance of an earlier run: %v, want nil", err)
+	}
+	stopped := false
+	inv.instances["fd40"] = &InstanceInfo{ID: "fd40", Name: "fd40", template: true, InstanceContextCancelFunc: func() { stopped = true }}
+	if err := inv.DestroyInstance("fd40"); err != nil || stopped {
+		t.Fatalf("the runner stopped a hidden VM: %v %v", err, stopped)
+	}
+}
+
+func TestInstanceIDsDifferAcrossRuns(t *testing.T) {
+	a, b := NewInventory(), NewInventory()
+	ida, idb := a.newID("fd40"), b.newID("fd40")
+	if ida == idb || !strings.HasPrefix(ida, "fd40-") {
+		t.Fatalf("ids %q and %q", ida, idb)
+	}
+	if a.newID("fd40") == ida {
+		t.Fatal("same id twice in one run")
+	}
+}

@@ -215,7 +215,7 @@ func (i *InstanceGroup) buildSnapshot(dir string) (*snapshot, error) {
 	tpl := opts.Info
 	stop := func() {
 		tpl.InstanceContextCancelFunc()
-		i.inventory.waitGone(tpl.Name, 30*time.Second)
+		i.inventory.waitGone(tpl.ID, 30*time.Second)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -525,11 +525,11 @@ func chAPI(ctx context.Context, socket, action string, body any) error {
 }
 
 // waitGone waits for an instance's cleanup to finish.
-func (i *Inventory) waitGone(name string, timeout time.Duration) {
+func (i *Inventory) waitGone(id string, timeout time.Duration) {
 	end := time.Now().Add(timeout)
 	for time.Now().Before(end) {
 		i.lock.RLock()
-		_, ok := i.instances[name]
+		_, ok := i.instances[id]
 		i.lock.RUnlock()
 		if !ok {
 			return

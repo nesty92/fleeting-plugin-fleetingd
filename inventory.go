@@ -23,6 +23,11 @@ import (
 )
 
 type InstanceInfo struct {
+	// ID is the instance's ID for fleeting, unique to this plugin run: a
+	// restarted plugin reuses slots and Names while the runner may still
+	// hold the old run's instances.
+	ID string
+	// Name is the VM's slot name, also its tap device's.
 	Name                      string
 	InstanceContextCancelFunc context.CancelFunc
 
@@ -51,12 +56,24 @@ type Inventory struct {
 
 	// IPAM "tickets" / subnet tracking
 	ipamSlots map[string]struct{}
-	// Inventory
+	// Inventory, by ID
 	instances map[string]*InstanceInfo
+	// run and seq make instance IDs unique across plugin runs.
+	run string
+	seq int
+}
+
+// newID names an instance for fleeting. Called with the lock held.
+func (i *Inventory) newID(name string) string {
+	i.seq++
+	return fmt.Sprintf("%s-%s%d", name, i.run, i.seq)
 }
 
 func NewInventory() *Inventory {
+	run := make([]byte, 3)
+	_, _ = rand.Read(run)
 	return &Inventory{
+		run:      hex.EncodeToString(run),
 		lock:     &sync.RWMutex{},
 		prebuild: &sync.Once{},
 
@@ -172,6 +189,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 
 	instanceIndex := subnetBase / stepSize
 	instanceName := instanceGroup.instanceName(instanceIndex)
+	instanceID := i.newID(instanceName)
 	workdir := filepath.Join(instanceGroup.VMDiskDir, vmWorkdir)
 
 	// Generate random mac address
@@ -340,7 +358,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 		delete(i.ipamSlots, slot)
 
 		// Clear instance from inventory
-		delete(i.instances, instanceName)
+		delete(i.instances, instanceID)
 
 		i.lock.Unlock()
 
@@ -352,6 +370,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 
 	// Update inventory
 	info := &InstanceInfo{
+		ID:                        instanceID,
 		Name:                      instanceName,
 		InstanceContextCancelFunc: instanceCancelFunc,
 
@@ -366,7 +385,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 		template: opts.template(),
 		pending:  snap != nil,
 	}
-	i.instances[instanceName] = info
+	i.instances[instanceID] = info
 	if opts != nil {
 		opts.Info = info
 	}
@@ -599,10 +618,12 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 		prebuildDone <- struct{}{}
 	}()
 
-	// Update inventory
+	// Update inventory. Not an instance the runner asked for: hidden.
 	i.instances[instanceName] = &InstanceInfo{
+		ID:                        instanceName,
 		Name:                      instanceName,
 		InstanceContextCancelFunc: instanceCancelFunc,
+		template:                  true,
 
 		HostTapIP:     hostTapIP,
 		InstanceTapIP: instanceTapIP,
@@ -654,11 +675,24 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 	return nil
 }
 
+// DestroyInstance stops one of the runner's instances and waits up to 10 s
+// for it to be gone.
 func (i *Inventory) DestroyInstance(name string) error {
-	// Try to destroy an instance, return error if it did not work within 10 seconds
+	return i.destroy(name, false)
+}
 
+// destroy stops an instance; hidden ones (prebuild, snapshot template)
+// only when hidden is set.
+func (i *Inventory) destroy(name string, hidden bool) error {
 	i.lock.Lock()
-	i.instances[name].InstanceContextCancelFunc()
+	instance, ok := i.instances[name]
+	if !ok || (instance.template && !hidden) {
+		// Gone already, or never this run's: a restarted plugin is asked
+		// to remove the instances of the run before it.
+		i.lock.Unlock()
+		return nil
+	}
+	instance.InstanceContextCancelFunc()
 	i.lock.Unlock()
 
 	waitCounter := 0
@@ -697,7 +731,7 @@ func (i *Inventory) DestroyAllInstances() error {
 	i.lock.Unlock()
 
 	for _, instanceToDestroy := range instanceNames {
-		err := i.DestroyInstance(instanceToDestroy)
+		err := i.destroy(instanceToDestroy, true)
 		if err != nil {
 			return err
 		}
@@ -746,7 +780,7 @@ func (i *Inventory) GetConnectInfo(name string) (*provider.ConnectInfo, error) {
 	}
 
 	connectionInfo := provider.ConnectInfo{
-		ID:           instance.Name,
+		ID:           instance.ID,
 		InternalAddr: instance.InstanceTapIP,
 
 		ConnectorConfig: provider.ConnectorConfig{
