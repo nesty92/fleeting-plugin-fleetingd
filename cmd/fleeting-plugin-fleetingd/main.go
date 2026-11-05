@@ -23,5 +23,11 @@ func main() {
 		return
 	}
 
+	// The plugin dies with the runner that started it: an orphan would keep
+	// its VMs and the disk directory's lock from the runner's next start.
+	if err := fleetingd.DieWithParent(); err != nil {
+		fmt.Fprintln(os.Stderr, "fleetingd:", err)
+		os.Exit(1)
+	}
 	plugin.Main(&fleetingd.InstanceGroup{}, fleetingd.Version)
 }

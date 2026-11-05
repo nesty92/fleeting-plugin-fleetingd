@@ -408,18 +408,24 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 
 	// A restored VM still has the template's address and identity: give it
 	// its own before anything connects.
-	script, err := identityScript(instanceName, instanceTapIP, hostTapIP, pubKey)
-	if err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		for {
-			_, err = runAgent(ctx, vsockPath, script)
-			if err == nil || ctx.Err() != nil {
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
+	var out string
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	for {
+		// Made for each try: it carries the host's time.
+		var script string
+		sent := time.Now()
+		script, err = identityScript(instanceName, instanceTapIP, hostTapIP, pubKey, sent)
+		if err != nil {
+			break
 		}
-		cancel()
+		out, err = runAgent(ctx, vsockPath, script)
+		if err == nil || ctx.Err() != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+	cancel()
+	drift, _ := clockDrift(out, time.Now())
 	if err != nil {
 		instanceGroup.logger.Error("restored VM did not take its identity", "instance", instanceName, "err", err)
 		instanceCancelFunc()
@@ -428,7 +434,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 	i.lock.Lock()
 	info.pending = false
 	i.lock.Unlock()
-	instanceGroup.logger.Info("restored instance VM", "instance", instanceName, "took", time.Since(started).Round(time.Millisecond).String())
+	instanceGroup.logger.Info("restored instance VM", "instance", instanceName, "took", time.Since(started).Round(time.Millisecond).String(), "clock_behind", drift.String())
 	return nil
 }
 

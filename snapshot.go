@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -397,13 +398,18 @@ func editRestoreConfig(cfg map[string]any, r restoreSettings) error {
 	return nil
 }
 
-// identityScript gives a restored VM its own address, key and identity.
-func identityScript(name, ip, gateway string, key ed25519.PublicKey) (string, error) {
+// identityScript gives a restored VM its own address, key and identity,
+// and the host's time: a restored guest's clock still reads the moment the
+// snapshot was taken, and tokens such as a GitHub runner's are refused
+// from a clock that far off. It prints the guest's clock before the fix.
+func identityScript(name, ip, gateway string, key ed25519.PublicKey, now time.Time) (string, error) {
 	pub, err := ssh.NewPublicKey(key)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf(`set -e
+echo clock_was=$(date +%%s.%%N)
+date -s @%[5]d.%09[6]d >/dev/null
 ip addr flush dev veth0
 ip addr add %[2]s/30 dev veth0
 ip route replace default via %[3]s
@@ -419,7 +425,25 @@ od -An -tx1 -N16 /dev/urandom | tr -d ' \n' > /etc/machine-id
 head -c 512 /dev/urandom > /dev/urandom
 chronyc -a makestep >/dev/null 2>&1 || true
 hostnamectl set-hostname %[1]s 2>/dev/null || hostname %[1]s
-`, name, ip, gateway, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))), nil
+`, name, ip, gateway, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))), now.Unix(), now.Nanosecond()), nil
+}
+
+// clockDrift reads how far behind the host a guest's clock was from the
+// identity script's output.
+func clockDrift(out string, at time.Time) (time.Duration, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		v, ok := strings.CutPrefix(strings.TrimSpace(line), "clock_was=")
+		if !ok {
+			continue
+		}
+		secs, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return 0, false
+		}
+		was := time.Unix(0, int64(secs*float64(time.Second)))
+		return at.Sub(was).Round(time.Millisecond), true
+	}
+	return 0, false
 }
 
 // runAgent runs a script as root in the VM behind a cloud-hypervisor vsock

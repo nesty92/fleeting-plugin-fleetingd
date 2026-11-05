@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 const snapConfig = `{
@@ -66,11 +67,11 @@ func TestEditRestoreConfigNeedsTheTemplateDisk(t *testing.T) {
 
 func TestIdentityScript(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
-	s, err := identityScript("fleetingd3", "172.16.120.14", "172.16.120.13", pub)
+	s, err := identityScript("fleetingd3", "172.16.120.14", "172.16.120.13", pub, time.Unix(1793840000, 5))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ip addr add 172.16.120.14/30 dev veth0", "via 172.16.120.13", "ssh-ed25519 ", "hostnamectl set-hostname fleetingd3", "/etc/machine-id"} {
+	for _, want := range []string{"ip addr add 172.16.120.14/30 dev veth0", "via 172.16.120.13", "ssh-ed25519 ", "hostnamectl set-hostname fleetingd3", "/etc/machine-id", "date -s @1793840000.000000005", "echo clock_was=$(date +%s.%N)"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script lacks %q", want)
 		}
@@ -95,5 +96,16 @@ func TestIsLeftover(t *testing.T) {
 		if got := isLeftover(c.cmdline, c.prefix); got != c.want {
 			t.Errorf("isLeftover(%q, %q) = %v, want %v", c.cmdline, c.prefix, got, c.want)
 		}
+	}
+}
+
+func TestClockDrift(t *testing.T) {
+	at := time.Unix(1793843600, 0)
+	d, ok := clockDrift("OK 1\nclock_was=1793840000.250000000\n", at)
+	if !ok || d != time.Hour-250*time.Millisecond {
+		t.Fatalf("drift %v %v, want 59m59.75s", d, ok)
+	}
+	if _, ok := clockDrift("nothing here", at); ok {
+		t.Fatal("drift from output without it")
 	}
 }

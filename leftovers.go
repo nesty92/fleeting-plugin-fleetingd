@@ -7,12 +7,29 @@ package fleetingd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+// DieWithParent makes the plugin get SIGKILL when the process that started
+// it exits, and its VMs with it (dieWithPlugin).
+func DieWithParent() error {
+	parent := os.Getppid()
+	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(syscall.SIGKILL), 0, 0, 0); err != nil {
+		return err
+	}
+	// The parent may have gone before the call took effect.
+	if os.Getppid() != parent {
+		return errors.New("the runner that started the plugin is gone")
+	}
+	return nil
+}
 
 // dieWithPlugin makes a VM process end when the plugin does.
 func dieWithPlugin() *syscall.SysProcAttr {
