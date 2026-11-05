@@ -8,7 +8,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -59,3 +59,12 @@ jobs:
           name: fleeting-plugin-fleetingd-artifacts
           if-no-files-found: error
           path: dist/artifacts/*.tar.gz
+
+      - name: Publish the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The fork's releases: notes from the tag's annotation
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/artifacts/*.tar.gz --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
