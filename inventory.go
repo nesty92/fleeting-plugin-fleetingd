@@ -274,9 +274,8 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 				"--api-socket", "path="+filepath.Join(opts.Template, "api.sock"),
 				"--vsock", "cid=3,socket="+vsockPath,
 				"--landlock-rules", fmt.Sprintf("path=%s,access=rw", opts.Template))
-		} else {
-			hypervisorCommand.Args = append(hypervisorCommand.Args, "--balloon", "size=0,free_page_reporting=on")
 		}
+		hypervisorCommand.Args = append(hypervisorCommand.Args, "--balloon", "size=0,free_page_reporting=on")
 
 		if instanceGroup.VMEnableVirtioConsole {
 			// Enable console
@@ -296,6 +295,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 		}
 	}
 
+	hypervisorCommand.SysProcAttr = dieWithPlugin()
 	stderrPath := filepath.Join(workdir, instanceName+"_stderr")
 	if f, ferr := os.Create(stderrPath); ferr == nil {
 		hypervisorCommand.Stderr = f
@@ -544,6 +544,7 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 	}
 
 	instanceGroup.logger.Info("starting instance VM", "instance", instanceName)
+	hypervisorCommand.SysProcAttr = dieWithPlugin()
 	err = hypervisorCommand.Start()
 	if err != nil {
 		// Nothing started: give back the slot and the lock, drop the seed.

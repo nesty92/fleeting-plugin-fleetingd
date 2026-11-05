@@ -64,7 +64,8 @@ type InstanceGroup struct {
 	kernelPath string
 	imageHold  *os.File
 	// snapshot is the snapshot VMs are restored from, with vm_snapshot.
-	snapshot *snapshot
+	snapshot     *snapshot
+	snapshotHold *os.File
 }
 
 // prebuildGrace delays vm_prebuild_on_start past processes that only Init

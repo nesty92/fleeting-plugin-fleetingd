@@ -42,6 +42,11 @@ func (i *InstanceGroup) prepareWorkdir() error {
 
 	workdirAbsPath := filepath.Join(i.VMDiskDir, vmWorkdir)
 
+	// VMs a previous run left behind; the disk directory lock is ours.
+	if pids := killLeftovers(workdirAbsPath); len(pids) > 0 {
+		i.logger.Warn("stopped VMs a previous run left behind", "pids", pids)
+	}
+
 	err := os.RemoveAll(workdirAbsPath)
 	if err != nil {
 		return err

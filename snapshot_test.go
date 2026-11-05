@@ -76,3 +76,24 @@ func TestIdentityScript(t *testing.T) {
 		}
 	}
 }
+
+func TestIsLeftover(t *testing.T) {
+	cmd := func(args ...string) []byte { return []byte(strings.Join(args, "\x00") + "\x00") }
+	work := []byte("/vms/.instance_data/")
+	for _, c := range []struct {
+		cmdline []byte
+		prefix  []byte
+		want    bool
+	}{
+		{cmd("cloud-hypervisor", "--disk", "path=/vms/.instance_data/fd40.img,image_type=qcow2"), work, true},
+		{cmd("/usr/bin/cloud-hypervisor", "--restore", "source_url=file:///vms/.instance_data/fd40_snap,resume=true"), work, true},
+		{cmd("cloud-hypervisor", "--api-socket", "path=/vms/.instance_data2/x.sock"), work, false},
+		{cmd("qemu-img", "create", "/vms/.instance_data/fd40.img"), work, false},
+		{cmd("cloud-hypervisor", "--disk", "path=/img/prebuilt-a.qcow2.tmp,image_type=qcow2"), []byte("/img/prebuilt-a.qcow2.tmp/"), true},
+		{cmd("cloud-hypervisor", "--vsock", "cid=3,socket=/vms/.instance_data/fd40.vsock"), work, true},
+	} {
+		if got := isLeftover(c.cmdline, c.prefix); got != c.want {
+			t.Errorf("isLeftover(%q, %q) = %v, want %v", c.cmdline, c.prefix, got, c.want)
+		}
+	}
+}

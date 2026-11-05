@@ -39,6 +39,9 @@ import (
 )
 
 const agentPort = 52
+
+// snapshotKeyVersion changes when the way snapshots are made changes.
+const snapshotKeyVersion = "2"
 const agentDone = "__fleetingd_agent_ok__"
 
 // snapshot is a built snapshot in use.
@@ -61,7 +64,18 @@ type bootOptions struct {
 
 func (o *bootOptions) template() bool { return o != nil && o.Template != "" }
 
-// snapshotKey names the snapshot for this image, VM size and hypervisor.
+// snapshotSlot names what a group asks of its VMs: size, network and
+// console. Groups with the same slot share a snapshot; a new key in the
+// same slot replaces an older one.
+func (i *InstanceGroup) snapshotSlot() string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%d\n%d\n%d\n%t\n%t\n%s", i.VMNumCPUCores, i.VMMemoryMegabytes, i.VMDiskSizeGB,
+		i.packageUpgrade(), i.VMEnableVirtioConsole, i.VMSubnet)
+	return hex.EncodeToString(h.Sum(nil))[:8]
+}
+
+// snapshotKey names how a slot's snapshot is made: the hypervisor, the
+// template's user data and this code's version.
 func (i *InstanceGroup) snapshotKey() (string, error) {
 	out, err := exec.Command("cloud-hypervisor", "--version").Output()
 	if err != nil {
@@ -72,19 +86,23 @@ func (i *InstanceGroup) snapshotKey() (string, error) {
 		return "", err
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\n%s\n%d\n%d\n%d\n%t\n%t\n%s\n%s", filepath.Base(i.imagePath), strings.TrimSpace(string(out)),
-		i.VMNumCPUCores, i.VMMemoryMegabytes, i.VMDiskSizeGB, i.packageUpgrade(), i.VMEnableVirtioConsole, i.VMSubnet, tpl)
-	return hex.EncodeToString(h.Sum(nil))[:12], nil
+	fmt.Fprintf(h, "%s\n%s\n%s", strings.TrimSpace(string(out)), tpl, snapshotKeyVersion)
+	return hex.EncodeToString(h.Sum(nil))[:8], nil
 }
 
-// ensureSnapshot builds this group's snapshot unless it exists, and uses it.
+// snapshotPrefix is the start of every snapshot name of this group's
+// image and slot: snapshot-<image>-<slot>-<key>.
+func (i *InstanceGroup) snapshotPrefix() string {
+	image := strings.TrimPrefix(strings.TrimSuffix(filepath.Base(i.imagePath), ".qcow2"), "prebuilt-")
+	return filepath.Join(i.imageDir(), "snapshot-"+image+"-"+i.snapshotSlot()+"-")
+}
+
 func (i *InstanceGroup) ensureSnapshot() error {
 	key, err := i.snapshotKey()
 	if err != nil {
 		return err
 	}
-	image := strings.TrimSuffix(filepath.Base(i.imagePath), ".qcow2")
-	dir := filepath.Join(i.imageDir(), fmt.Sprintf("snapshot-%s-%s", strings.TrimPrefix(image, "prebuilt-"), key))
+	dir := i.snapshotPrefix() + key
 
 	lock, err := os.OpenFile(dir+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -96,17 +114,67 @@ func (i *InstanceGroup) ensureSnapshot() error {
 	}
 	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
 
-	if s, err := loadSnapshot(dir); err == nil {
+	s, err := loadSnapshot(dir)
+	if err == nil {
 		i.logger.Info("reusing the snapshot", "snapshot", filepath.Base(dir))
-		i.snapshot = s
-		return nil
+	} else if s, err = i.buildSnapshot(dir); err != nil {
+		return err
 	}
-	s, err := i.buildSnapshot(dir)
+	// Held for the group's lifetime, as the image is: a snapshot no group
+	// holds may be removed.
+	hold, err := os.Open(filepath.Join(dir, "meta.json"))
 	if err != nil {
 		return err
 	}
-	i.snapshot = s
+	if err := unix.Flock(int(hold.Fd()), unix.LOCK_SH); err != nil {
+		hold.Close()
+		return err
+	}
+	if i.snapshotHold != nil {
+		i.snapshotHold.Close()
+	}
+	i.snapshotHold, i.snapshot = hold, s
+	i.removeUnusedSnapshots(dir)
 	return nil
+}
+
+// removeUnusedSnapshots deletes older snapshots of this group's image and
+// slot that no group holds or is building, such as those of an older
+// plugin or cloud-hypervisor. Other slots' snapshots belong to other
+// groups, which may not have started yet; snapshots of other images go
+// with their image.
+func (i *InstanceGroup) removeUnusedSnapshots(keep string) {
+	dirs, _ := filepath.Glob(i.snapshotPrefix() + "*")
+	for _, dir := range dirs {
+		if dir == keep || strings.HasSuffix(dir, ".lock") || strings.HasSuffix(dir, ".tmp") {
+			continue
+		}
+		if removeSnapshotIfUnused(dir) {
+			i.logger.Info("removed an unused snapshot", "snapshot", filepath.Base(dir))
+		}
+	}
+}
+
+func removeSnapshotIfUnused(dir string) bool {
+	lock, err := os.OpenFile(dir+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false
+	}
+	defer lock.Close()
+	if unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+		return false
+	}
+	if meta, err := os.Open(filepath.Join(dir, "meta.json")); err == nil {
+		defer meta.Close()
+		if unix.Flock(int(meta.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+			return false
+		}
+	}
+	if os.RemoveAll(dir) != nil {
+		return false
+	}
+	_ = os.Remove(dir + ".lock")
+	return true
 }
 
 func loadSnapshot(dir string) (*snapshot, error) {
@@ -129,6 +197,8 @@ func loadSnapshot(dir string) (*snapshot, error) {
 
 func (i *InstanceGroup) buildSnapshot(dir string) (*snapshot, error) {
 	tmp := dir + ".tmp"
+	// A build that died with its plugin; the snapshot lock is ours.
+	killLeftovers(tmp)
 	_ = os.RemoveAll(tmp)
 	if err := os.MkdirAll(tmp, 0o700); err != nil {
 		return nil, err
@@ -164,6 +234,11 @@ docker version --format '{{.Server.Version}}' >/dev/null`)
 	}
 	i.logger.Info("snapshot template ready", "after", time.Since(start).Round(time.Millisecond).String())
 
+	// Less for the snapshot to hold: free page cache, and give the host
+	// back what the guest freed (free page reporting) before pausing.
+	if _, err := runAgent(ctx, vsock, "sync; echo 3 > /proc/sys/vm/drop_caches; sleep 2"); err != nil {
+		i.logger.Warn("could not drop the template's caches", "err", err)
+	}
 	api := filepath.Join(tmp, "api.sock")
 	if err := chAPI(ctx, api, "vm.pause", nil); err != nil {
 		stop()
@@ -178,6 +253,11 @@ docker version --format '{{.Server.Version}}' >/dev/null`)
 		return nil, err
 	}
 	stop()
+	if used, err := punchZeros(filepath.Join(tmp, "snap", "memory-ranges")); err != nil {
+		i.logger.Warn("could not make the snapshot's memory sparse", "err", err)
+	} else {
+		i.logger.Info("snapshot memory", "on_disk_mb", used>>20, "guest_mb", i.VMMemoryMegabytes)
+	}
 	// Every VM restored from it reads this disk through its own overlay.
 	for _, f := range []string{"disk.qcow2", "seed.img"} {
 		if err := os.Chmod(filepath.Join(tmp, f), 0o400); err != nil {

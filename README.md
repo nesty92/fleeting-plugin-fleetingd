@@ -16,7 +16,9 @@
 > - `vm_prebuild_on_start = true` to build the image when the plugin starts,
 >   not when the first job arrives;
 > - `vm_snapshot = true` to restore VMs from a snapshot instead of booting
->   them: ready for SSH in 0.3–0.6 s instead of 6–10 s (see `snapshot.go`);
+>   them: ready for SSH in 0.3–0.6 s instead of 6–10 s (see `snapshot.go`).
+>   The snapshot's memory file is sparse: 6 GB of guest RAM take about 800 MB;
+> - VMs die with the plugin, and a start stops any a previous run left behind;
 > - a fix for a failed VM start, which kept the inventory lock and the
 >   address slot, and for a failed prebuild, which only its first caller saw.
 >

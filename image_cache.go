@@ -138,6 +138,8 @@ func (i *InstanceGroup) ensureImage() error {
 // moves the result into place only once it succeeded.
 func (i *InstanceGroup) buildImage(disk, kernel, image, imageKernel string) error {
 	tmp, tmpKernel := image+".tmp", imageKernel+".tmp"
+	// A build that died with its plugin; the build lock is ours.
+	killLeftovers(tmp)
 	defer os.Remove(tmp)
 	defer os.Remove(tmpKernel)
 
@@ -187,7 +189,10 @@ func (i *InstanceGroup) removeUnusedImages(keep string) {
 			// Its snapshots: no VM uses them once no group holds the image.
 			snaps, _ := filepath.Glob(filepath.Join(i.imageDir(), "snapshot-"+strings.TrimPrefix(filepath.Base(base), "prebuilt-")+"-*"))
 			for _, s := range snaps {
-				_ = os.RemoveAll(s)
+				if !strings.HasSuffix(s, ".lock") {
+					removeSnapshotIfUnused(s)
+				}
+				_ = os.Remove(s)
 			}
 			i.logger.Info("removed an unused image", "image", filepath.Base(image))
 		}
