@@ -81,6 +81,13 @@ func (i *InstanceGroup) ensureImage() error {
 	}
 	defer unix.Flock(int(build.Fd()), unix.LOCK_UN)
 
+	if i.VMImageURL != "" {
+		image, imageKernel, err := i.ensurePublishedImage()
+		if err != nil {
+			return err
+		}
+		return i.useImage(image, imageKernel)
+	}
 	if err := i.ensureImages(); err != nil {
 		return err
 	}
@@ -115,7 +122,12 @@ func (i *InstanceGroup) ensureImage() error {
 			return err
 		}
 	}
+	return i.useImage(image, imageKernel)
+}
 
+// useImage holds image for the group's lifetime and removes the images no
+// group holds. Called with the directory's build lock held.
+func (i *InstanceGroup) useImage(image, imageKernel string) error {
 	hold, err := os.Open(image)
 	if err != nil {
 		return err

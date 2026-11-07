@@ -18,6 +18,13 @@
 > - `vm_snapshot = true` to restore VMs from a snapshot instead of booting
 >   them: ready for SSH in 0.3–0.6 s instead of 6–10 s (see `snapshot.go`).
 >   The snapshot's memory file is sparse: 6 GB of guest RAM take about 800 MB;
+> - `vm_image_url` to use a published image instead of building one: the
+>   URL of a `SHA256SUMS` listing a `.qcow2` and a `.vmlinuz`, by names
+>   relative to it or by absolute URLs, `{arch}` standing for the host's
+>   architecture. New images are downloaded on start and checked; when the
+>   list can't be read, the last one is used. `fleeting-plugin-fleetingd
+>   build-image -config plugin_config.json -out DIR` builds such an image,
+>   without a runner, as root on a host with `/dev/kvm`;
 > - VMs die with the plugin, and a start stops any a previous run left behind;
 > - a fix for a failed VM start, which kept the inventory lock and the
 >   address slot, and for a failed prebuild, which only its first caller saw.
@@ -240,4 +247,8 @@ You can run `fleeting-plugin-fleetingd licenses` to view the software's and depe
       # fork: restore VMs from a snapshot of a booted one, taken once per image
       # and VM size after the prebuild. Falls back to booting if it can't be made.
       vm_snapshot = false
+
+      # fork: a published prebuilt image instead of building one; set this or
+      # vm_prebuild_cloudinit_extra_cmds, not both
+      # vm_image_url = "https://example.com/images/small-{arch}.SHA256SUMS"
 ```

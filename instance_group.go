@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +55,10 @@ type InstanceGroup struct {
 	// booting them: ready in under a second instead of 5-7. The snapshot is
 	// taken once per image and VM size, after the prebuild. See snapshot.go.
 	VMSnapshot bool `json:"vm_snapshot"`
+	// VMImageURL is a published prebuilt image to use instead of building
+	// one: the URL of a SHA256SUMS listing its .qcow2 and .vmlinuz. {arch}
+	// in it stands for the host's (amd64, arm64). See published_image.go.
+	VMImageURL string `json:"vm_image_url"`
 
 	logger    hclog.Logger
 	inventory *Inventory
@@ -88,6 +93,15 @@ func (i *InstanceGroup) validate() error {
 	}
 	if i.VMDiskSizeGB < prebuildDiskGB {
 		return fmt.Errorf("vm_disk_size_gb %d: at least %d, the prebuilt image's size", i.VMDiskSizeGB, prebuildDiskGB)
+	}
+	if i.VMImageURL != "" {
+		u, err := url.Parse(i.VMImageURL)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			return fmt.Errorf("vm_image_url %q: want an http(s) URL of a SHA256SUMS file", i.VMImageURL)
+		}
+		if len(i.VMPrebuildCloudinitExtraCmds) > 0 {
+			return fmt.Errorf("vm_image_url and vm_prebuild_cloudinit_extra_cmds: a published image is used as it is, so set only one")
+		}
 	}
 	if i.VMSubnet == "" {
 		i.VMSubnet = VMPrefix
@@ -129,18 +143,8 @@ func (i *InstanceGroup) Init(ctx context.Context, logger hclog.Logger, settings 
 
 	i.inventory = NewInventory()
 
-	// Check all supporting tools are installed
-	requiredBinaries := []string{
-		"cloud-hypervisor",
-		"nft",
-		"qemu-img",
-	}
-
-	for _, binary := range requiredBinaries {
-		_, err := exec.LookPath(binary)
-		if err != nil {
-			return provider.ProviderInfo{}, fmt.Errorf("could not find required binary %s on PATH, please check the PATH variable or install the missing tool: %w", binary, err)
-		}
+	if err := checkTools(); err != nil {
+		return provider.ProviderInfo{}, err
 	}
 
 	// Check disk dir is writable
@@ -274,4 +278,14 @@ func (i *InstanceGroup) Shutdown(ctx context.Context) error {
 
 func (i *InstanceGroup) MakeAddress(index int) string {
 	return i.VMSubnet + strconv.Itoa(index)
+}
+
+// checkTools makes sure the tools the plugin runs are installed.
+func checkTools() error {
+	for _, binary := range []string{"cloud-hypervisor", "nft", "qemu-img"} {
+		if _, err := exec.LookPath(binary); err != nil {
+			return fmt.Errorf("could not find required binary %s on PATH, please check the PATH variable or install the missing tool: %w", binary, err)
+		}
+	}
+	return nil
 }
