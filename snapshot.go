@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -431,30 +432,48 @@ func editRestoreConfig(cfg map[string]any, r restoreSettings) error {
 // and the host's time: a restored guest's clock still reads the moment the
 // snapshot was taken, and tokens such as a GitHub runner's are refused
 // from a clock that far off. It prints the guest's clock before the fix.
-func identityScript(name, ip, gateway string, key ed25519.PublicKey, now time.Time) (string, error) {
+func identityScript(name, ip, gateway string, key ed25519.PublicKey, hostKey ed25519.PrivateKey, now time.Time) (string, error) {
 	pub, err := ssh.NewPublicKey(key)
 	if err != nil {
 		return "", err
 	}
+	// The VM's SSH host key is made here rather than by ssh-keygen in the
+	// VM, which costs some 80 ms a restore.
+	hostPub, err := ssh.NewPublicKey(hostKey.Public())
+	if err != nil {
+		return "", err
+	}
+	block, err := ssh.MarshalPrivateKey(hostKey, "")
+	if err != nil {
+		return "", err
+	}
+	// Few processes: right after a restore each one is slow to start, its
+	// memory read in from the snapshot as it is touched.
 	return fmt.Sprintf(`set -e
 echo clock_was=$(date +%%s.%%N)
 date -s @%[5]d.%09[6]d >/dev/null
-ip addr flush dev veth0
-ip addr add %[2]s/30 dev veth0
-ip route replace default via %[3]s
+ip -batch - <<IP
+addr flush dev veth0
+addr add %[2]s/30 dev veth0
+route replace default via %[3]s
+IP
 sed -i -E 's|- [0-9.]+/30|- %[2]s/30|; s|via: [0-9.]+|via: %[3]s|' /etc/netplan/50-cloud-init.yaml 2>/dev/null || true
 install -d -m 700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
+install -m 600 -o ubuntu -g ubuntu /dev/null /home/ubuntu/.ssh/authorized_keys
 echo '%[4]s' > /home/ubuntu/.ssh/authorized_keys
-chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
-chmod 600 /home/ubuntu/.ssh/authorized_keys
 rm -f /etc/ssh/ssh_host_*
-ssh-keygen -A >/dev/null
-systemctl reload ssh || systemctl restart ssh
+(umask 077; printf '%%s' '%[7]s' > /etc/ssh/ssh_host_ed25519_key)
+echo '%[8]s root@%[1]s' > /etc/ssh/ssh_host_ed25519_key.pub
+# A running sshd reloads its keys; one that socket activation hasn't
+# started yet reads them when it starts.
+if pgrep -x sshd >/dev/null; then systemctl reload ssh || systemctl restart ssh; fi
 od -An -tx1 -N16 /dev/urandom | tr -d ' \n' > /etc/machine-id
 head -c 512 /dev/urandom > /dev/urandom
 chronyc -a makestep >/dev/null 2>&1 || true
-hostnamectl set-hostname %[1]s 2>/dev/null || hostname %[1]s
-`, name, ip, gateway, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))), now.Unix(), now.Nanosecond()), nil
+echo %[1]s > /etc/hostname
+hostname %[1]s
+`, name, ip, gateway, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))), now.Unix(), now.Nanosecond(),
+		string(pem.EncodeToMemory(block)), strings.TrimSpace(string(ssh.MarshalAuthorizedKey(hostPub)))), nil
 }
 
 // clockDrift reads how far behind the host a guest's clock was from the

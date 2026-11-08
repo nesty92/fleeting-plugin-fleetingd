@@ -3,9 +3,12 @@ package fleetingd
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 const snapConfig = `{
@@ -67,14 +70,27 @@ func TestEditRestoreConfigNeedsTheTemplateDisk(t *testing.T) {
 
 func TestIdentityScript(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
-	s, err := identityScript("fleetingd3", "172.16.120.14", "172.16.120.13", pub, time.Unix(1793840000, 5))
+	hostPub, hostKey, _ := ed25519.GenerateKey(nil)
+	s, err := identityScript("fleetingd3", "172.16.120.14", "172.16.120.13", pub, hostKey, time.Unix(1793840000, 5))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ip addr add 172.16.120.14/30 dev veth0", "via 172.16.120.13", "ssh-ed25519 ", "hostnamectl set-hostname fleetingd3", "/etc/machine-id", "date -s @1793840000.000000005", "echo clock_was=$(date +%s.%N)"} {
+	sshHostPub, _ := ssh.NewPublicKey(hostPub)
+	for _, want := range []string{
+		"addr add 172.16.120.14/30 dev veth0", "route replace default via 172.16.120.13",
+		"ssh-ed25519 ", "-----BEGIN OPENSSH PRIVATE KEY-----", strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshHostPub))) + " root@fleetingd3",
+		"hostname fleetingd3", "/etc/machine-id", "date -s @1793840000.000000005", "echo clock_was=$(date +%s.%N)",
+	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script lacks %q", want)
 		}
+	}
+	if strings.Contains(s, "ssh-keygen") {
+		t.Error("the VM still makes its own host keys")
+	}
+	// It parses as a shell script: its here-document ends, its quotes close.
+	if out, err := exec.Command("sh", "-n", "-c", s).CombinedOutput(); err != nil {
+		t.Errorf("sh -n: %v: %s", err, out)
 	}
 }
 

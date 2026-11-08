@@ -46,6 +46,7 @@ type InstanceInfo struct {
 
 type Inventory struct {
 	lock     *sync.RWMutex
+	nftLock  sync.Mutex
 	prebuild *sync.Once
 	// prebuildErr is the prebuild's result, for every caller of
 	// EnsurePrebuild and not only the one that ran it.
@@ -403,28 +404,12 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 	// Release lock for nftables
 	i.lock.Unlock()
 
-	// Wait for tap device to become available
-	checkCounter := 0
-	tapReady := false
-
-	for {
-		interfaces, err := net.Interfaces()
-		if err != nil {
-			return err
-		}
-		for _, device := range interfaces {
-			if device.Name == instanceName {
-				tapReady = true
-				break
-			}
-		}
-
-		if tapReady || checkCounter > 100 {
+	// Wait for the tap device: cloud-hypervisor makes it within tens of
+	// milliseconds, so look often. Up to ten seconds, as before.
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if _, err := net.InterfaceByName(instanceName); err == nil {
 			break
 		}
-
-		time.Sleep(100 * time.Millisecond)
-		checkCounter++
 	}
 
 	// Render and apply nftables rules (wait for tap interface)
@@ -437,13 +422,18 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 
 	// A restored VM still has the template's address and identity: give it
 	// its own before anything connects.
+	_, hostKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		instanceCancelFunc()
+		return fmt.Errorf("restoring %s: %w", instanceName, err)
+	}
 	var out string
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	for {
 		// Made for each try: it carries the host's time.
 		var script string
 		sent := time.Now()
-		script, err = identityScript(instanceName, instanceTapIP, hostTapIP, pubKey, sent)
+		script, err = identityScript(instanceName, instanceTapIP, hostTapIP, pubKey, hostKey, sent)
 		if err != nil {
 			break
 		}
@@ -812,7 +802,11 @@ func (i *Inventory) GetConnectInfo(name string) (*provider.ConnectInfo, error) {
 }
 
 func (i *Inventory) ApplyNftables(instanceGroup *InstanceGroup) error {
-	// Render nftables template for setup and apply it
+	// Render nftables template for setup and apply it. VMs boot in
+	// parallel: one apply at a time, each from the inventory as it is then,
+	// so the last one applied knows every VM.
+	i.nftLock.Lock()
+	defer i.nftLock.Unlock()
 
 	type nftablesTemplateInstanceInfo struct {
 		Name                  string

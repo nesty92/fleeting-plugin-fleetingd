@@ -2,6 +2,7 @@ package fleetingd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -191,17 +193,27 @@ func (i *InstanceGroup) Update(ctx context.Context, updateFunc func(instance str
 }
 
 func (i *InstanceGroup) Increase(ctx context.Context, n int) (succeeded int, err error) {
-	// Try to boot more instances
-
-	for counter := 0; counter < n; counter++ {
-		err := i.inventory.BootInstance(i, nil)
-		if err != nil {
-			i.logger.Error("instance boot error", "error", err)
-			return counter, err
-		}
+	// Boot them side by side: a restore is mostly waiting on the VM, and a
+	// burst of jobs shouldn't wait for each VM in turn.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bootErr := i.inventory.BootInstance(i, nil)
+			mu.Lock()
+			defer mu.Unlock()
+			if bootErr != nil {
+				i.logger.Error("instance boot error", "error", bootErr)
+				err = errors.Join(err, bootErr)
+				return
+			}
+			succeeded++
+		}()
 	}
-
-	return n, nil
+	wg.Wait()
+	return succeeded, err
 }
 
 func (i *InstanceGroup) Decrease(ctx context.Context, instances []string) ([]string, error) {
