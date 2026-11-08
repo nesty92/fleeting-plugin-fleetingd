@@ -61,6 +61,9 @@ func (i *InstanceGroup) imageKey(diskSum, kernelSum string) (string, error) {
 	for _, c := range i.VMPrebuildCloudinitExtraCmds {
 		fmt.Fprintf(h, "cmd %d:%s\n", len(c), c)
 	}
+	if i.VMPrebuildSkipGitlabRunner {
+		fmt.Fprintln(h, "no gitlab-runner")
+	}
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 

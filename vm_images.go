@@ -329,21 +329,25 @@ func (i *InstanceGroup) createUserdataPrebuild(instanceName string, macAddress s
 	// Render userdata
 
 	type userDataTemplateInput struct {
-		InstanceName  string
-		MACAddress    string
-		IP            string
-		Gateway       string
-		Netmask       string
-		ExtraCommands []string
+		InstanceName     string
+		MACAddress       string
+		IP               string
+		Gateway          string
+		Netmask          string
+		ExtraCommands    []string
+		SkipGitlabRunner bool
+		FailedMarker     string
 	}
 
 	templateInput := userDataTemplateInput{
-		InstanceName:  instanceName,
-		MACAddress:    macAddress,
-		IP:            ip,
-		Gateway:       gateway,
-		Netmask:       netmask,
-		ExtraCommands: i.VMPrebuildCloudinitExtraCmds,
+		InstanceName:     instanceName,
+		MACAddress:       macAddress,
+		IP:               ip,
+		Gateway:          gateway,
+		Netmask:          netmask,
+		ExtraCommands:    i.VMPrebuildCloudinitExtraCmds,
+		SkipGitlabRunner: i.VMPrebuildSkipGitlabRunner,
+		FailedMarker:     prebuildFailedMarker,
 	}
 
 	templates, err := template.ParseFS(userDataTemplates, "templates/*.tpl")

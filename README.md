@@ -24,7 +24,11 @@
 >   architecture. New images are downloaded on start and checked; when the
 >   list can't be read, the last one is used. `fleeting-plugin-fleetingd
 >   build-image -config plugin_config.json -out DIR` builds such an image,
->   without a runner, as root on a host with `/dev/kvm`;
+>   without a runner, as root on a host with `/dev/kvm`. It fails when one
+>   of `vm_prebuild_cloudinit_extra_cmds` does; a runner's prebuild logs
+>   each failed command, with `vm_enable_virtio_console = true`;
+> - `vm_prebuild_skip_gitlab_runner = true` to leave gitlab-runner out of the
+>   image, for VMs that never run it (docker-autoscaler, other CI systems);
 > - VMs die with the plugin, and a start stops any a previous run left behind;
 > - a fix for a failed VM start, which kept the inventory lock and the
 >   address slot, and for a failed prebuild, which only its first caller saw.

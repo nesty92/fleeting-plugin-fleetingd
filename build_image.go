@@ -30,6 +30,9 @@ func BuildImage(settings []byte, out, name string, logger hclog.Logger) error {
 	if err := i.validate(); err != nil {
 		return err
 	}
+	// The console is where a failed command is reported.
+	i.VMEnableVirtioConsole = true
+	i.strictPrebuild = true
 	if err := checkTools(); err != nil {
 		return err
 	}

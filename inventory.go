@@ -560,9 +560,12 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 		"console=hvc0 root=/dev/vda1 rw",
 		"--landlock")
 
+	consolePath := ""
 	if instanceGroup.VMEnableVirtioConsole {
 		// Enable console
-		consolePath := filepath.Join(instanceGroup.VMDiskDir, vmWorkdir, fmt.Sprintf("%s_console", instanceName))
+		consolePath = filepath.Join(instanceGroup.VMDiskDir, vmWorkdir, fmt.Sprintf("%s_console", instanceName))
+		// An earlier build's report isn't this one's.
+		_ = os.Remove(consolePath)
 
 		hypervisorCommand.Args = append(hypervisorCommand.Args, "--console",
 			fmt.Sprintf("file=%s", consolePath))
@@ -672,7 +675,47 @@ func (i *Inventory) PrebuildInstance(instanceGroup *InstanceGroup) error {
 	<-prebuildDone
 	instanceGroup.logger.Info("prebuild finished.")
 
+	if consolePath == "" {
+		return nil
+	}
+	console, err := os.ReadFile(consolePath)
+	if err != nil {
+		if instanceGroup.strictPrebuild {
+			return fmt.Errorf("reading the prebuild's console: %w", err)
+		}
+		instanceGroup.logger.Warn("can't tell whether the prebuild's commands succeeded", "err", err)
+		return nil
+	}
+	failed := prebuildFailures(console, instanceGroup.VMPrebuildCloudinitExtraCmds)
+	for _, f := range failed {
+		instanceGroup.logger.Error("prebuild command failed", "command", f)
+	}
+	if len(failed) > 0 && instanceGroup.strictPrebuild {
+		return fmt.Errorf("%d of vm_prebuild_cloudinit_extra_cmds failed, the first: %s", len(failed), failed[0])
+	}
 	return nil
+}
+
+// prebuildFailedMarker starts the console line the prebuild writes for a
+// failed command: the marker, the command's index and its exit status.
+const prebuildFailedMarker = "fleetingd-prebuild-failed:"
+
+// prebuildFailures reads the commands that failed from a prebuild's
+// console, each as "#<n> (exit <status>): <command>".
+func prebuildFailures(console []byte, cmds []string) []string {
+	var failed []string
+	for _, line := range strings.Split(string(console), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), prebuildFailedMarker+" ")
+		if !ok {
+			continue
+		}
+		var n, status int
+		if _, err := fmt.Sscanf(rest, "%d %d", &n, &status); err != nil || n < 0 || n >= len(cmds) {
+			continue
+		}
+		failed = append(failed, fmt.Sprintf("#%d (exit %d): %s", n+1, status, cmds[n]))
+	}
+	return failed
 }
 
 // DestroyInstance stops one of the runner's instances and waits up to 10 s

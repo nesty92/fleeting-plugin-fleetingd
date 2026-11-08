@@ -40,6 +40,10 @@ type InstanceGroup struct {
 	VMDiskSizeGB                 uint64   `json:"vm_disk_size_gb"`
 	VMPrebuildCloudinitExtraCmds []string `json:"vm_prebuild_cloudinit_extra_cmds"`
 	VMEnableVirtioConsole        bool     `json:"vm_enable_virtio_console"`
+	// VMPrebuildSkipGitlabRunner leaves gitlab-runner out of the prebuilt
+	// image, for VMs that never run it: the docker-autoscaler executor's
+	// jobs run in containers, and other CI systems don't use it.
+	VMPrebuildSkipGitlabRunner bool `json:"vm_prebuild_skip_gitlab_runner"`
 	// VMFullDiskCopy copies the whole prebuilt image for each VM instead of
 	// giving it a qcow2 overlay. Only for cloud-hypervisor without
 	// backing_files support.
@@ -64,7 +68,11 @@ type InstanceGroup struct {
 
 	logger    hclog.Logger
 	inventory *Inventory
-	lockFile  *os.File
+	// strictPrebuild fails a prebuild one of whose commands failed, for
+	// build-image; a runner's prebuild logs them and goes on, as it always
+	// has.
+	strictPrebuild bool
+	lockFile       *os.File
 	// The prebuilt image in use, its kernel, and the shared lock that keeps
 	// other builds from deleting it.
 	imagePath  string

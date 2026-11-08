@@ -35,14 +35,19 @@ runcmd:
   - chmod -x /etc/update-motd.d/*
   - loginctl enable-linger ubuntu
 
+{{- if not .SkipGitlabRunner}}
   # Install latest GitLab runner so artifacts can be pulled
   - curl -L "https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh" | os=ubuntu dist=noble bash
   - apt install -y gitlab-runner
+{{- end}}
 
   # CUSTOM COMMANDS START
 
-{{range $command := .ExtraCommands}}
+  # runcmd is one shell script and goes on past a failing line: after each
+  # command, its exit status goes to the console, where the plugin finds it.
+{{range $n, $command := .ExtraCommands}}
   - {{$command}}
+  - 's=$?; [ $s -eq 0 ] || echo "{{$.FailedMarker}} {{$n}} $s" > /dev/hvc0 2>/dev/null || true'
 {{end}}
 
   # CUSTOM COMMANDS END
