@@ -226,9 +226,13 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 			instanceCancelFunc()
 			return fail(err)
 		}
-		vsockPath = filepath.Join(workdir, instanceName+".vsock")
+		vsockPath, err = instanceGroup.socketPath(instanceName + ".vsock")
+		if err != nil {
+			instanceCancelFunc()
+			return fail(err)
+		}
 		files = append(files, vsockPath)
-		snapDir, err := instanceGroup.prepareRestore(instanceName, hostTapIP, overlayPath)
+		snapDir, err := instanceGroup.prepareRestore(instanceName, hostTapIP, overlayPath, vsockPath)
 		files = append(files, filepath.Join(workdir, instanceName+"_snap"))
 		if err != nil {
 			instanceCancelFunc()
@@ -287,11 +291,17 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 		)
 		if opts.template() {
 			// Paused and saved over the API; the agent listens on vsock.
-			vsockPath = filepath.Join(opts.Template, "vsock")
+			var apiPath string
+			apiPath, vsockPath, err = instanceGroup.templateSockets(opts.Template)
+			if err != nil {
+				instanceCancelFunc()
+				return fail(err)
+			}
 			hypervisorCommand.Args = append(hypervisorCommand.Args,
-				"--api-socket", "path="+filepath.Join(opts.Template, "api.sock"),
+				"--api-socket", "path="+apiPath,
 				"--vsock", "cid=3,socket="+vsockPath,
-				"--landlock-rules", fmt.Sprintf("path=%s,access=rw", opts.Template))
+				"--landlock-rules", fmt.Sprintf("path=%s,access=rw", opts.Template),
+				"--landlock-rules", fmt.Sprintf("path=%s,access=rw", instanceGroup.socketDir()))
 		}
 		hypervisorCommand.Args = append(hypervisorCommand.Args, "--balloon", "size=0,free_page_reporting=on")
 

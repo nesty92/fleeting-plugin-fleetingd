@@ -51,6 +51,9 @@ func (i *InstanceGroup) prepareWorkdir() error {
 	if err != nil {
 		return err
 	}
+	if err := i.prepareSocketDir(); err != nil {
+		return err
+	}
 
 	return os.MkdirAll(workdirAbsPath, 0700)
 }

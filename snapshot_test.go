@@ -29,10 +29,10 @@ func TestEditRestoreConfig(t *testing.T) {
 		Disk:         "/vms/w/fleetingd3.img",
 		Tap:          "fleetingd3",
 		HostIP:       "172.16.120.13",
-		Vsock:        "/vms/w/fleetingd3.vsock",
+		Vsock:        "/tmp/fleetingd-abc/fleetingd3.vsock",
 		Console:      "/vms/w/fleetingd3_console",
 		Landlock:     []string{"/img"},
-		Writable:     "/vms/w",
+		Writable:     []string{"/vms/w", "/tmp/fleetingd-abc"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -44,9 +44,9 @@ func TestEditRestoreConfig(t *testing.T) {
 		`"tap":"fleetingd3"`,
 		`"ip":"172.16.120.13"`,
 		`"mac":"de:51:00:00:00:01"`,
-		`"socket":"/vms/w/fleetingd3.vsock"`,
+		`"socket":"/tmp/fleetingd-abc/fleetingd3.vsock"`,
 		`"file":"/vms/w/fleetingd3_console","mode":"File"`,
-		`"landlock_rules":[{"access":"rw","path":"/vms/w"},{"access":"r","path":"/img"}]`,
+		`"landlock_rules":[{"access":"rw","path":"/vms/w"},{"access":"rw","path":"/tmp/fleetingd-abc"},{"access":"r","path":"/img"}]`,
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("config lacks %s:\n%s", want, out)

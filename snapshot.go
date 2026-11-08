@@ -242,7 +242,11 @@ func (i *InstanceGroup) buildSnapshot(dir string) (*snapshot, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	vsock := filepath.Join(tmp, "vsock")
+	api, vsock, err := i.templateSockets(tmp)
+	if err != nil {
+		stop()
+		return nil, err
+	}
 	for {
 		_, err := runAgent(ctx, vsock, `cloud-init status --wait >/dev/null 2>&1 || true
 docker version --format '{{.Server.Version}}' >/dev/null`)
@@ -262,7 +266,6 @@ docker version --format '{{.Server.Version}}' >/dev/null`)
 	if _, err := runAgent(ctx, vsock, "sync; echo 3 > /proc/sys/vm/drop_caches; sleep 2"); err != nil {
 		i.logger.Warn("could not drop the template's caches", "err", err)
 	}
-	api := filepath.Join(tmp, "api.sock")
 	if err := chAPI(ctx, api, "vm.pause", nil); err != nil {
 		stop()
 		return nil, err
@@ -293,8 +296,9 @@ docker version --format '{{.Server.Version}}' >/dev/null`)
 	if err := os.WriteFile(filepath.Join(tmp, "meta.json"), meta, 0o600); err != nil {
 		return nil, err
 	}
-	for _, f := range []string{"api.sock", "vsock"} {
-		_ = os.Remove(filepath.Join(tmp, f))
+	// Cloud Hypervisor locks its API socket with a file beside it.
+	for _, f := range []string{api, api + ".lock", vsock} {
+		_ = os.Remove(f)
 	}
 	_ = os.RemoveAll(dir)
 	if err := os.Rename(tmp, dir); err != nil {
@@ -306,7 +310,7 @@ docker version --format '{{.Server.Version}}' >/dev/null`)
 
 // prepareRestore writes this VM's copy of the snapshot: its own disk, tap,
 // host address, vsock socket and console. The memory file is shared.
-func (i *InstanceGroup) prepareRestore(name, hostIP, disk string) (string, error) {
+func (i *InstanceGroup) prepareRestore(name, hostIP, disk, vsock string) (string, error) {
 	s := i.snapshot
 	work := filepath.Join(i.VMDiskDir, vmWorkdir)
 	dir := filepath.Join(work, name+"_snap")
@@ -329,10 +333,10 @@ func (i *InstanceGroup) prepareRestore(name, hostIP, disk string) (string, error
 		Disk:         disk,
 		Tap:          name,
 		HostIP:       hostIP,
-		Vsock:        filepath.Join(work, name+".vsock"),
+		Vsock:        vsock,
 		Console:      consoleFile(i, name),
 		Landlock:     []string{i.imageDir()},
-		Writable:     work,
+		Writable:     []string{work, i.socketDir()},
 	}); err != nil {
 		return "", err
 	}
@@ -378,7 +382,7 @@ func consoleFile(i *InstanceGroup, name string) string {
 type restoreSettings struct {
 	TemplateDisk, Disk, Tap, HostIP, Vsock, Console string
 	Landlock                                        []string // read-only paths
-	Writable                                        string
+	Writable                                        []string
 }
 
 // editRestoreConfig points a copy of the snapshot's config at one VM.
@@ -412,7 +416,10 @@ func editRestoreConfig(cfg map[string]any, r restoreSettings) error {
 			c["mode"], c["file"] = "Off", nil
 		}
 	}
-	rules := []any{map[string]any{"path": r.Writable, "access": "rw"}}
+	var rules []any
+	for _, p := range r.Writable {
+		rules = append(rules, map[string]any{"path": p, "access": "rw"})
+	}
 	for _, p := range r.Landlock {
 		rules = append(rules, map[string]any{"path": p, "access": "r"})
 	}
