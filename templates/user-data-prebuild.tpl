@@ -29,6 +29,12 @@ runcmd:
   # fail2ban
   - systemctl enable fail2ban
 
+  # Fast SSH logins: no motd scripts, some of them Python and half a second
+  # a login between them, and the ubuntu user's systemd instance kept
+  # running rather than started by each first login.
+  - chmod -x /etc/update-motd.d/*
+  - loginctl enable-linger ubuntu
+
   # Install latest GitLab runner so artifacts can be pulled
   - curl -L "https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh" | os=ubuntu dist=noble bash
   - apt install -y gitlab-runner

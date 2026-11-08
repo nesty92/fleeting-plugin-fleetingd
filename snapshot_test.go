@@ -148,3 +148,9 @@ func TestInstanceIDsDifferAcrossRuns(t *testing.T) {
 		t.Fatal("same id twice in one run")
 	}
 }
+
+func TestLoginPrepParses(t *testing.T) {
+	if out, err := exec.Command("sh", "-n", "-c", loginPrep).CombinedOutput(); err != nil {
+		t.Errorf("sh -n: %v: %s", err, out)
+	}
+}

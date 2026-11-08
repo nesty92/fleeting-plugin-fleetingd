@@ -43,7 +43,7 @@ import (
 const agentPort = 52
 
 // snapshotKeyVersion changes when the way snapshots are made changes.
-const snapshotKeyVersion = "2"
+const snapshotKeyVersion = "3"
 const agentDone = "__fleetingd_agent_ok__"
 
 // snapshot is a built snapshot in use.
@@ -219,6 +219,19 @@ func loadSnapshot(dir, image string) (*snapshot, error) {
 	return &s, nil
 }
 
+// loginPrep makes the template's SSH logins fast: its first one took
+// 650 ms, 470 of them update-motd.d's scripts and the rest starting
+// user@1000.service.
+const loginPrep = `set -e
+chmod -x /etc/update-motd.d/* 2>/dev/null || true
+loginctl enable-linger ubuntu
+uid=$(id -u ubuntu)
+for n in $(seq 100); do
+  systemctl is-active -q "user@$uid.service" && break
+  sleep 0.1
+done
+systemctl is-active -q "user@$uid.service"`
+
 func (i *InstanceGroup) buildSnapshot(dir string) (*snapshot, error) {
 	tmp := dir + ".tmp"
 	// A build that died with its plugin; the snapshot lock is ours.
@@ -259,6 +272,12 @@ docker version --format '{{.Server.Version}}' >/dev/null`)
 			return nil, fmt.Errorf("snapshot template never got ready: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+	// What a VM's first SSH login would start, started once here: the
+	// ubuntu user's systemd instance, which the snapshot then holds, and no
+	// motd scripts. A published image may not have them off already.
+	if _, err := runAgent(ctx, vsock, loginPrep); err != nil {
+		i.logger.Warn("SSH logins to restored VMs may be slow", "err", err)
 	}
 	i.logger.Info("snapshot template ready", "after", time.Since(start).Round(time.Millisecond).String())
 
