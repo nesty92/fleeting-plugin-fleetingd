@@ -196,6 +196,7 @@ func (i *InstanceGroup) Update(ctx context.Context, updateFunc func(instance str
 
 		updateFunc(instance, provider.StateRunning)
 	}
+	i.inventory.MarkReported(instances)
 	for instance, state := range i.inventory.TakeExited() {
 		updateFunc(instance, state)
 	}

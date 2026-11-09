@@ -30,6 +30,8 @@ type InstanceInfo struct {
 	// Name is the VM's slot name, also its tap device's.
 	Name                      string
 	InstanceContextCancelFunc context.CancelFunc
+	// reported is set once Update has told fleeting about the instance.
+	reported bool
 
 	HostTapIP             string
 	InstanceTapIP         string
@@ -345,6 +347,8 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 		return fail(err)
 	}
 
+	// vmDone closes once the VM's process has exited.
+	vmDone := make(chan struct{})
 	go func() {
 		//
 		// VM cleanup - cancel VM context to trigger stopping the VM process and then calling this function
@@ -352,6 +356,7 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 
 		// Wait for VM to terminate (when context gets cancelled)
 		werr := hypervisorCommand.Wait()
+		close(vmDone)
 		onItsOwn := instanceContext.Err() == nil
 		if werr != nil && onItsOwn {
 			// Exited on its own, not stopped by us: say why.
@@ -376,9 +381,13 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 		delete(i.ipamSlots, slot)
 
 		// Clear instance from inventory
+		reported := i.instances[instanceID] != nil && i.instances[instanceID].reported
 		delete(i.instances, instanceID)
 		if onItsOwn && !opts.template() {
 			i.exited[instanceID] = 0
+			if reported {
+				i.exited[instanceID] = 1
+			}
 		}
 
 		i.lock.Unlock()
@@ -439,6 +448,14 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 	}
 	var out string
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// A VM that exits meanwhile will never answer: stop at once.
+	go func() {
+		select {
+		case <-vmDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	for {
 		// Made for each try: it carries the host's time.
 		var script string
@@ -455,6 +472,13 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 	}
 	cancel()
 	drift, _ := clockDrift(out, time.Now())
+	select {
+	case <-vmDone:
+		if err != nil {
+			err = fmt.Errorf("the VM exited before it answered: %w", err)
+		}
+	default:
+	}
 	if err != nil {
 		instanceGroup.logger.Error("restored VM did not take its identity", "instance", instanceName, "err", err)
 		instanceCancelFunc()
@@ -793,6 +817,17 @@ func (i *Inventory) DestroyAllInstances() error {
 	return nil
 }
 
+// MarkReported records that Update has told fleeting about these instances.
+func (i *Inventory) MarkReported(ids []string) {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	for _, id := range ids {
+		if info := i.instances[id]; info != nil {
+			info.reported = true
+		}
+	}
+}
+
 func (i *Inventory) GetAllInstances() []string {
 	// List all instance names
 
@@ -812,9 +847,10 @@ func (i *Inventory) GetAllInstances() []string {
 }
 
 // TakeExited is what Update says of the instances whose VM stopped on its
-// own: first creating, then deleted. A VM that dies before fleeting has seen
-// it would otherwise stay pending in fleeting forever, a VM it asked for and
-// never got; and one it has seen would wait out five missed updates.
+// own: deleted, at once for one Update has reported. One that died before
+// Update reported it is first reported creating, then deleted: fleeting
+// ignores the deletion of an instance it never saw, and would keep it
+// pending forever, a VM it asked for and never got.
 func (i *Inventory) TakeExited() map[string]provider.State {
 	i.lock.Lock()
 	defer i.lock.Unlock()
