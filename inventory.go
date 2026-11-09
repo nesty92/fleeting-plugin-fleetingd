@@ -55,6 +55,10 @@ type Inventory struct {
 	// Stop accepting requests when this is true
 	shuttingDown bool
 
+	// exited are the instances whose VM stopped on its own, by id, with how
+	// many times Update has reported them since: see TakeExited.
+	exited map[string]int
+
 	// IPAM "tickets" / subnet tracking
 	ipamSlots map[string]struct{}
 	// Inventory, by ID
@@ -80,6 +84,7 @@ func NewInventory() *Inventory {
 
 		ipamSlots: make(map[string]struct{}),
 		instances: make(map[string]*InstanceInfo),
+		exited:    make(map[string]int),
 	}
 }
 
@@ -346,7 +351,9 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 		//
 
 		// Wait for VM to terminate (when context gets cancelled)
-		if werr := hypervisorCommand.Wait(); werr != nil && instanceContext.Err() == nil {
+		werr := hypervisorCommand.Wait()
+		onItsOwn := instanceContext.Err() == nil
+		if werr != nil && onItsOwn {
 			// Exited on its own, not stopped by us: say why.
 			out, _ := os.ReadFile(stderrPath)
 			instanceGroup.logger.Error("instance VM exited", "instance", instanceName, "err", werr, "stderr", lastLines(string(out), 5))
@@ -370,6 +377,9 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 
 		// Clear instance from inventory
 		delete(i.instances, instanceID)
+		if onItsOwn && !opts.template() {
+			i.exited[instanceID] = 0
+		}
 
 		i.lock.Unlock()
 
@@ -799,6 +809,26 @@ func (i *Inventory) GetAllInstances() []string {
 	i.lock.RUnlock()
 
 	return instanceNames
+}
+
+// TakeExited is what Update says of the instances whose VM stopped on its
+// own: first creating, then deleted. A VM that dies before fleeting has seen
+// it would otherwise stay pending in fleeting forever, a VM it asked for and
+// never got; and one it has seen would wait out five missed updates.
+func (i *Inventory) TakeExited() map[string]provider.State {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	states := map[string]provider.State{}
+	for id, n := range i.exited {
+		if n == 0 {
+			states[id] = provider.StateCreating
+			i.exited[id] = 1
+			continue
+		}
+		states[id] = provider.StateDeleted
+		delete(i.exited, id)
+	}
+	return states
 }
 
 func (i *Inventory) GetConnectInfo(name string) (*provider.ConnectInfo, error) {

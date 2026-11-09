@@ -196,6 +196,9 @@ func (i *InstanceGroup) Update(ctx context.Context, updateFunc func(instance str
 
 		updateFunc(instance, provider.StateRunning)
 	}
+	for instance, state := range i.inventory.TakeExited() {
+		updateFunc(instance, state)
+	}
 
 	return nil
 }
@@ -306,6 +309,15 @@ func checkTools() error {
 		if _, err := exec.LookPath(binary); err != nil {
 			return fmt.Errorf("could not find required binary %s on PATH, please check the PATH variable or install the missing tool: %w", binary, err)
 		}
+	}
+	// One that is there but does not run would fail every VM, one by one.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "cloud-hypervisor", "--version")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cloud-hypervisor does not run: %w: %s", err, lastLines(stderr.String(), 2))
 	}
 	return nil
 }
