@@ -65,6 +65,11 @@ type InstanceGroup struct {
 	// one: the URL of a SHA256SUMS listing its .qcow2 and .vmlinuz. {arch}
 	// in it stands for the host's (amd64, arm64). See published_image.go.
 	VMImageURL string `json:"vm_image_url"`
+	// VMCacheDir holds the disks that are added to running VMs with
+	// "fleeting-plugin-fleetingd disk attach", such as fleetci's cache
+	// disks. Set, every VM gets an API socket and may open the files in it;
+	// unset, no disk can be added. See disk.go.
+	VMCacheDir string `json:"vm_cache_directory"`
 
 	logger    hclog.Logger
 	inventory *Inventory
@@ -112,6 +117,12 @@ func (i *InstanceGroup) validate() error {
 		if len(i.VMPrebuildCloudinitExtraCmds) > 0 {
 			return fmt.Errorf("vm_image_url and vm_prebuild_cloudinit_extra_cmds: a published image is used as it is, so set only one")
 		}
+	}
+	if i.VMCacheDir != "" {
+		if !filepath.IsAbs(i.VMCacheDir) {
+			return fmt.Errorf("vm_cache_directory %q: want an absolute path", i.VMCacheDir)
+		}
+		i.VMCacheDir = filepath.Clean(i.VMCacheDir)
 	}
 	if i.VMSubnet == "" {
 		i.VMSubnet = VMPrefix
@@ -164,6 +175,13 @@ func (i *InstanceGroup) Init(ctx context.Context, logger hclog.Logger, settings 
 	}
 	if err := i.lockDiskDir(); err != nil {
 		return provider.ProviderInfo{}, err
+	}
+	if i.VMCacheDir != "" {
+		// Each VM's landlock rules name it, and cloud-hypervisor won't start
+		// on a rule whose path is missing.
+		if err := os.MkdirAll(i.VMCacheDir, 0o700); err != nil {
+			return provider.ProviderInfo{}, fmt.Errorf("vm_cache_directory: %w", err)
+		}
 	}
 
 	if i.VMPrebuildOnStart {
