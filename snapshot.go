@@ -348,6 +348,10 @@ func (i *InstanceGroup) prepareRestore(name, hostIP, disk, vsock string) (string
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return "", err
 	}
+	writable := []string{work, i.socketDir()}
+	if i.VMCacheDir != "" {
+		writable = append(writable, i.VMCacheDir)
+	}
 	if err := editRestoreConfig(cfg, restoreSettings{
 		TemplateDisk: s.Disk,
 		Disk:         disk,
@@ -356,7 +360,7 @@ func (i *InstanceGroup) prepareRestore(name, hostIP, disk, vsock string) (string
 		Vsock:        vsock,
 		Console:      consoleFile(i, name),
 		Landlock:     []string{i.imageDir()},
-		Writable:     []string{work, i.socketDir()},
+		Writable:     writable,
 	}); err != nil {
 		return "", err
 	}

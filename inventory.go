@@ -329,6 +329,21 @@ func (i *Inventory) BootInstance(instanceGroup *InstanceGroup, opts *bootOptions
 			hypervisorCommand.Args = append(hypervisorCommand.Args,
 				"--landlock-rules", fmt.Sprintf("path=%s,access=r", instanceGroup.imagePath))
 		}
+		if instanceGroup.VMCacheDir != "" && !opts.template() {
+			hypervisorCommand.Args = append(hypervisorCommand.Args,
+				"--landlock-rules", fmt.Sprintf("path=%s,access=rw", instanceGroup.VMCacheDir))
+		}
+	}
+	if instanceGroup.VMCacheDir != "" && !opts.template() {
+		// For disk attach and detach. A restored VM's landlock rules are in
+		// its copy of the snapshot's config (prepareRestore).
+		apiPath, err := instanceGroup.instanceAPISocket(instanceName)
+		if err != nil {
+			instanceCancelFunc()
+			return fail(err)
+		}
+		files = append(files, apiPath)
+		hypervisorCommand.Args = append(hypervisorCommand.Args, "--api-socket", "path="+apiPath)
 	}
 
 	hypervisorCommand.SysProcAttr = dieWithPlugin()

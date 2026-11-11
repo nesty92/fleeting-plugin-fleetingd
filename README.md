@@ -27,6 +27,14 @@
 >   without a runner, as root on a host with `/dev/kvm`. It fails when one
 >   of `vm_prebuild_cloudinit_extra_cmds` does; a runner's prebuild logs
 >   each failed command, with `vm_enable_virtio_console = true`;
+> - `vm_cache_directory` to add a disk to a running VM and take it out
+>   again, for a cache that outlives the VM, such as fleetci's:
+>   `fleeting-plugin-fleetingd disk -config plugin_config.json attach
+>   <instance> <layer.qcow2>`, then `detach <instance>` once the guest has
+>   unmounted it. The guest sees it as `/dev/disk/by-id/virtio-cache` in
+>   about 0.2 s, booted or restored from a snapshot. Its layer and backing
+>   files must be in the directory: it is the only one the VMs may open
+>   besides their own (see `disk.go`);
 > - `vm_prebuild_skip_gitlab_runner = true` to leave gitlab-runner out of the
 >   image, for VMs that never run it (docker-autoscaler, other CI systems);
 > - VMs die with the plugin, and a start stops any a previous run left behind;
@@ -255,4 +263,8 @@ You can run `fleeting-plugin-fleetingd licenses` to view the software's and depe
       # fork: a published prebuilt image instead of building one; set this or
       # vm_prebuild_cloudinit_extra_cmds, not both
       # vm_image_url = "https://example.com/images/small-{arch}.SHA256SUMS"
+
+      # fork: disks "fleeting-plugin-fleetingd disk attach" may add to running
+      # VMs, such as fleetci's cache disks; unset, no disk can be added
+      # vm_cache_directory = "/var/lib/fleetci/cache"
 ```
